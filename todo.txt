@@ -1,0 +1,10 @@
+- write script that runs model on sample image & draws bounding boxes
+- extract location of bounding boxes
+- rotate image based on roll (& maybe pitch?) of camera
+- Get angle between principal ray of ship and buoy (from pixel space)
+- With angle and dist information transform buoy from camera cs to global cs
+- perform matching
+
+Additional tasks:
+- add object tracking
+- add robustness to model detection by creating more training data

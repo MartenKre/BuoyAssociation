@@ -1,0 +1,5 @@
+train: C:\Users\ben93\Downloads\Charleston3_withdistances\images\train
+val: C:\Users\ben93\Downloads\Charleston3_withdistances\images\val
+test: C:\Users\ben93\Downloads\Charleston3_withdistances\images\test
+nc: 2
+names: ['boat', 'other']

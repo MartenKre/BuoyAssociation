@@ -38,7 +38,7 @@ class DistanceEstimator():
         # post processing (NMS) & rescaling to original image
         detections = non_max_suppression(pred, self.conf_thresh, self.iou_thresh)[0]
         detections[:, :4] = scale_coords(img_resized.shape[2:], detections[:, :4], img.shape, ratio_pad=(ratio, pad)).round()
-        return detections
+        return detections.cpu()
     
     def checkPath(self, filepath):
         if not os.path.isfile(filepath):

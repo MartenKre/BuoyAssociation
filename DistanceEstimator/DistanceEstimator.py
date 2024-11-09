@@ -54,7 +54,7 @@ class DistanceEstimator():
             matchedPairs = self.findCorrespondance(labelsData, pred, img)
         for BB in pred:
             BB = BB.cpu()
-            x,y,w,h,conf,cls,dist=BB
+            x,y,w,h,conf,cls,dist=BB[:7]
             if conf > conf_thresh: # only plot BBs that have conf values larger than 0.25
                 if labelsData is None:
                     annotation = f"{conf:.2f}, {int(dist)}"

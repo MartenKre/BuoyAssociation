@@ -94,3 +94,14 @@ def haversineDist(lat1, lon1, lat2, lon2):
     c = 2 * asin(sqrt(a)) 
     r = 6371 # Radius of earth in kilometers. Use 3956 for miles. Determines return value units.
     return c * r * 1e3
+
+def T_W_Ship(pos, heading):
+    # used by rendering to transform ship cs to world (start cs)
+    # Arguments: pos of ship (x,y,z) in global cs. heading of ship in rad
+    # Start CS is at 0,0,0 and heading = 0 -> x=north, y = west, z = up
+    # ship moves around in it
+    T = np.eye(4)
+    R = getRotationMatrix(-1*heading, 'z')  # -1*heading, since we have to rotate start cs in negative direction for pos heading
+    T[:3, :3] = R
+    T[:3, 3] = pos
+    return T

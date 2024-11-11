@@ -1,4 +1,5 @@
 from OpenGL.GL import *
+import OpenGL.GL.shaders
 from OpenGL.GLUT import *
 from OpenGL.GLU import *
 import numpy as np
@@ -45,6 +46,23 @@ class RenderBuoys():
         self.t = 0
         self.dt = 0.03  # delta for logic function
 
+        # load shaders
+        #vertex_source = self.loadShaders("fog_vertex_shader.vert")
+        #fragment_source = self.loadShaders("fog_fragment_shader.frag")
+
+        # # Compile the shader program
+        # shader_program = self.compile_shader(vertex_source, fragment_source)
+        # glUseProgram(shader_program)
+
+        # # Set fog parameters
+        # fog_color = (0.5, 0.6, 0.7)  # Example fog color (light blue)
+        # fog_start = 300.0             # Distance at which fog starts
+        # fog_end = 1500.0              # Distance at which fog is fully opaque
+        # glUniform3fv(glGetUniformLocation(shader_program, "fogColor"), 1, fog_color)
+        # glUniform1f(glGetUniformLocation(shader_program, "fogStart"), fog_start)
+        # glUniform1f(glGetUniformLocation(shader_program, "fogEnd"), fog_end)
+
+
         # OPENGL Init
         glutInit() # Initialize a glut instance which will allow us to customize our window
         glutInitDisplayMode(GLUT_RGBA) # Set the display mode to be colored
@@ -55,6 +73,37 @@ class RenderBuoys():
         glutIdleFunc(self.showScreen)     # Draw any graphics or shapes in the showScreen function at all times
         glutTimerFunc(self.logic_interval, self.updateLogic, 0)  # Start the logic timer
         glutMainLoop()  # Keeps the window created above displaying/running in a loop
+
+    def loadShaders(self, filename):
+        with open(filename, 'r') as file:
+            return file.read()
+
+    def compile_shader(self, vertex_source, fragment_source):
+        vertex_shader = glCreateShader(GL_VERTEX_SHADER)
+        glShaderSource(vertex_shader, vertex_source)
+        glCompileShader(vertex_shader)
+        if glGetShaderiv(vertex_shader, GL_COMPILE_STATUS) != GL_TRUE:
+            raise RuntimeError(glGetShaderInfoLog(vertex_shader).decode('utf-8'))
+        
+        fragment_shader = glCreateShader(GL_FRAGMENT_SHADER)
+        glShaderSource(fragment_shader, fragment_source)
+        glCompileShader(fragment_shader)
+        if glGetShaderiv(fragment_shader, GL_COMPILE_STATUS) != GL_TRUE:
+            raise RuntimeError(glGetShaderInfoLog(fragment_shader).decode('utf-8'))
+        
+        shader_program = glCreateProgram()
+        glAttachShader(shader_program, vertex_shader)
+        glAttachShader(shader_program, fragment_shader)
+        glLinkProgram(shader_program)
+        if glGetProgramiv(shader_program, GL_LINK_STATUS) != GL_TRUE:
+            raise RuntimeError(glGetProgramInfoLog(shader_program).decode('utf-8'))
+        
+        # Clean up shaders as they are now linked into the program
+        glDeleteShader(vertex_shader)
+        glDeleteShader(fragment_shader)
+        
+        return shader_program
+
 
     def initTransformations(self, lat, lng, heading):
         # function needs to be called to initialize Transformation matrices
@@ -125,11 +174,6 @@ class RenderBuoys():
     def renderBuoyGT(self):
         # the predictions are expected to be in lat lon coords
         for x, y in self.buoysGT:
-            glPushMatrix()
-            glTranslatef(x, y, 0.0) 
-            glColor3f(0.0, 0.8, 0.0)  # Set color to red
-            glutSolidSphere(10, 50, 50)  # Draw a sphere with radius, 50 slices, and 50 stacks
-            glPopMatrix()
             ## draw line from ship to buoy
             p_ship = self.W_T_Ship[:3, 3]
             glColor3f(0.5, 0.5, 0.5)  # Set color to red
@@ -139,6 +183,12 @@ class RenderBuoys():
             for point in points:
                 glVertex3f(point[0], point[1], 0)
             glEnd()
+            glPushMatrix()
+            # render buoy
+            glTranslatef(x, y, 0.0) 
+            glColor3f(0.0, 0.8, 0.0)  # Set color to red
+            glutSolidSphere(10, 50, 50)  # Draw a sphere with radius, 50 slices, and 50 stacks
+            glPopMatrix()
 
     def renderBuoyPreds(self):
         # the predictions are expected to be in lat lon coords
@@ -234,3 +284,203 @@ class RenderBuoys():
 
 
 render = RenderBuoys()
+
+
+# import pygame
+# from OpenGL.GL import *
+# from OpenGL.GL.shaders import compileProgram, compileShader
+# import numpy as np
+# from math import sin, cos, tan, radians
+# import glm
+
+# # Vertex Shader
+# vertex_shader = """
+# #version 330
+# in vec3 position;
+# in vec3 color;
+# out vec3 newColor;
+# out float dist;
+# uniform mat4 model;
+# uniform mat4 view;
+# uniform mat4 projection;
+
+# void main()
+# {
+#     gl_Position = projection * view * model * vec4(position, 1.0);
+#     float dist = length(view * model * vec4(position,1.0));
+#     newColor = color;
+# }
+# """
+
+# # Fragment Shader
+# fragment_shader = """
+# #version 330
+# in vec3 newColor;
+# in float dist;
+# out vec4 outColor;
+
+# void main()
+# {
+#     float fog_maxdist = 8.0;
+#     float fog_mindist = 0.1;
+#     vec4  fog_colour = vec4(0.5, 0.5, 0.5, 1.0);
+
+#     // Calculate fog
+#     float fog_factor = (fog_maxdist - dist) /
+#                     (fog_maxdist - fog_mindist);
+#     fog_factor = clamp(fog_factor, 0.0, 1.0);
+
+#     outColor = mix(fog_colour, vec4(newColor,1.0), fog_factor);
+# }
+# """
+
+# # Cube vertices and colors
+# vertices = np.array([
+#     # Vertices        Colors
+#     [-.1, -.1, -.1], [1, 0, 0],
+#     [.1, -.1, -.1], [0, 1, 0],
+#     [.1, .1, -.1], [0, 0, 1],
+#     [-.1, .1, -.1], [1, 1, 0],
+#     [-.1, -.1, .1], [0, 1, 1],
+#     [.1, -.1, .1], [1, 1, 1],
+#     [.1, .1, .1], [0.5, 0.5, 0.5],
+#     [-.1, .1, .1], [0.5, 0.5, 0.5],
+# ], dtype=np.float32)
+
+# indices = np.array([
+#     0, 1, 2, 2, 3, 0,  # Front face
+#     1, 5, 6, 6, 2, 1,  # Right face
+#     5, 4, 7, 7, 6, 5,  # Back face
+#     4, 0, 3, 3, 7, 4,  # Left face
+#     3, 2, 6, 6, 7, 3,  # Top face
+#     4, 5, 1, 1, 0, 4,  # Bottom face
+# ], dtype=np.uint32)
+
+# def init():
+#     # Create Vertex Array Object (VAO)
+#     vao = glGenVertexArrays(1)
+#     glBindVertexArray(vao)
+
+#     # Create Vertex Buffer Object (VBO) and Element Buffer Object (EBO)
+#     vbo = glGenBuffers(1)
+#     glBindBuffer(GL_ARRAY_BUFFER, vbo)
+#     glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+
+#     ebo = glGenBuffers(1)
+#     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo)
+#     glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+
+#     # Set attribute pointers
+#     stride = 6 * vertices.itemsize
+#     position_offset = ctypes.c_void_p(0)
+#     color_offset = ctypes.c_void_p(3 * vertices.itemsize)
+#     glVertexAttribPointer(0, 3, GL_FLOAT, GL_TRUE, stride, position_offset)
+#     glVertexAttribPointer(1, 3, GL_FLOAT, GL_TRUE, stride, color_offset)
+#     glEnableVertexAttribArray(0)
+#     glEnableVertexAttribArray(1)
+
+#     return vao
+
+# def main():
+#     # Initialize Pygame
+#     pygame.init()
+#     width, height = 800, 600
+#     pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
+#     pygame.display.set_caption("Shader Testing")
+#     glViewport(0, 0, width, height)
+
+#     # Compile shaders and create shader program
+#     shader_program = compileProgram(compileShader(vertex_shader, GL_VERTEX_SHADER),
+#                                     compileShader(fragment_shader, GL_FRAGMENT_SHADER))
+#     model_loc = glGetUniformLocation(shader_program, "model")
+#     view_loc = glGetUniformLocation(shader_program, "view")
+#     projection_loc = glGetUniformLocation(shader_program, "projection")
+#     vao = init()
+
+#     # # Light parameters
+#     # light_position_loc = glGetUniformLocation(shader_program, "lightPosition")
+#     # light_color_loc = glGetUniformLocation(shader_program, "lightColor")
+#     # object_color_loc = glGetUniformLocation(shader_program, "objectColor")
+
+#     running = True
+#     while running:
+#         for event in pygame.event.get():
+#             if event.type == pygame.QUIT:
+#                 running = False
+
+#         glClearColor(0.0, 0.0, 0.0, 0.0)
+#         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+#         glEnable(GL_DEPTH_TEST)
+
+#         # Define the view and projection matrices (unchanged)
+#         W_T_C = np.array([[1.0, 0.0, 0.0, 0],
+#                 [0.0, 1.0, 0.0, 0.0],
+#                 [0.0, 0.0, 1.0, -3.0],
+#                 [0.0, 0.0, 0.0, 1.0]])
+#         view = np.linalg.inv(W_T_C)
+#         eye = np.array([-3.0, 0.0, 1.0])  # Camera position (looking from 3 units on the Z-axis)
+#         center = np.array([0.0, 0.0, 0.0])  # Point the camera is looking at (origin)
+#         up = np.array([0.0, 0.0, 1.0])  # Up vector (typically (0, 1, 0) for the Y-axis)
+
+#         # Compute the view matrix using glm.lookAt
+#         view = np.array(glm.lookAt(eye, center, up))
+
+#         aspect_ratio = width / height
+#         near = 0.1
+#         far = 100.0
+#         fov = 45.0
+        
+#         projection = np.array(glm.perspective(glm.radians(fov), aspect_ratio, near, far))
+
+#         light_position = np.array([1.0, -1.0, 1.0], dtype=np.float32)
+#         light_color = np.array([1.0, 1.0, 1.0], dtype=np.float32)  # White light
+#         object_color = np.array([1.0, 0.5, 0.5], dtype=np.float32)  # Red object
+
+#         # Define the model matrix (rotate the cube)
+#         angle = pygame.time.get_ticks() / 1000.0  # Rotate the cube over time
+#         model = np.array([[cos(angle), -sin(angle), 0, 20],
+#                  [sin(angle), cos(angle), 0, 0],
+#                  [0, 0, 1, 0],
+#                  [0, 0, 0, 1]])
+
+#         model2 = np.array([[cos(angle), -sin(angle), 0, 0],
+#                  [sin(angle), cos(angle), 0, 1],
+#                  [0, 0, 1, 0],
+#                  [0, 0, 0, 1]])
+#         model3 = np.array([[cos(angle), -sin(angle), 0, 0],
+#                  [sin(angle), cos(angle), 0, -1],
+#                  [0, 0, 1, 0],
+#                  [0, 0, 0, 1]])
+
+#         # Use the shader program
+#         glUseProgram(shader_program)
+
+#         # Set the model, view, and projection matrices in the shader 
+#         glUniformMatrix4fv(view_loc, 1, GL_TRUE, view)
+#         glUniformMatrix4fv(projection_loc, 1, GL_TRUE, projection)
+
+#         glUniformMatrix4fv(model_loc, 1, GL_TRUE, model)
+
+#         # glUniform3fv(light_position_loc, 1, light_position)
+#         # glUniform3fv(light_color_loc, 1, light_color)
+#         # glUniform3fv(object_color_loc, 1, object_color)
+
+#         glBindVertexArray(vao)
+#         glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+
+
+#         glUniformMatrix4fv(model_loc, 1, GL_TRUE, model2)
+#         glBindVertexArray(vao)
+#         glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+
+#         glUniformMatrix4fv(model_loc, 1, GL_TRUE, model3)
+#         glBindVertexArray(vao)
+#         glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+
+#         pygame.display.flip()
+
+#     pygame.quit()
+
+
+# if __name__ == "__main__":
+#     main()

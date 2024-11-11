@@ -178,6 +178,7 @@ class BuoyAssociation():
 
         plt.draw()
         plt.savefig(os.path.join(folder, name+".pdf"), dpi=300)
+        plt.close()
     
     def plot_Predictions_to_map(self, data, zoom=1.5, name="buoyPredictions", folder=""):
         # func expects a dict containing predicted buoys and ship as key and the lat lon pairs as values

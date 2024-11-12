@@ -10,6 +10,7 @@ import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF
+from utility.GeoData import GetGeoData
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 
@@ -25,8 +26,9 @@ class BuoyAssociation():
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
-        self.distanceEstimator = DistanceEstimator(iou_thresh = 0.3)
-        self.imu_data = self.getIMUData()
+        self.distanceEstimator = DistanceEstimator(iou_thresh = 0.3)    # load Yolov7 with Distance Module
+        self.BuoyCoordinates = GetGeoData() # load BuoyData from GeoJson
+        self.imu_data = self.getIMUData()   # load IMU data
         self.runAssociations()
 
     def runAssociations(self):

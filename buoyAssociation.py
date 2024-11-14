@@ -1,5 +1,4 @@
 # Script uses DistanceEstimator to obtain Object Detection DistEst Data from modified YOLOv7 Network
-  
 import cv2
 import sys
 import os
@@ -9,56 +8,70 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF
+from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
 from utility.GeoData import GetGeoData
+from hungarian_algorithm import algorithm
+import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 
 from DistanceEstimator import DistanceEstimator
 
-test_folder = "/home/marten/Uni/Semester_4/src/Trainingdata/labeled/StPete_BuoysOnly/981_2"
+test_folder = "/home/marten/Uni/Semester_4/src/Trainingdata/labeled/Testdata/954_2_Pete2"
 images_dir = os.path.join(test_folder, 'images') 
 labels_dir = os.path.join(test_folder, 'labels')
 imu_dir = os.path.join(test_folder, 'imu') 
 
 class BuoyAssociation():
-    def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
+    def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080], plots = True):
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
-        self.distanceEstimator = DistanceEstimator(iou_thresh = 0.3)    # load Yolov7 with Distance Module
-        self.BuoyCoordinates = GetGeoData() # load BuoyData from GeoJson
-        self.imu_data = self.getIMUData()   # load IMU data
-        self.runAssociations()
+        self.distanceEstimator = DistanceEstimator(conv_thresh = 0.4, iou_thresh = 0.3)    # load Yolov7 with Distance Module, iou_thresh for NMS
+        self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
+        self.imu_data = None
+        self.plots = plots
+        if self.plots == True:
+            self.plots_folder = self.create_run_directory(path="detections/")
 
-    def runAssociations(self):
-        for image in os.listdir(images_dir):    
-            self.getPredictions(os.path.join(images_dir, image))
+    def test(self):
+        # function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
+        # plots will include distance GT and GT buoy positions
+        self.imu_data = self.getIMUData(imu_dir)   # load IMU data
 
-    def getPredictions(self, image_path):
-        print("image: ", image_path)
-        img = cv2.imread(image_path)
-        if img is None:
-            print(f"Could not read {image_path}")
-            return False
+        for image in os.listdir(images_dir):   
+            image_path = os.path.join(images_dir, image) 
+            print("image: ", image_path)
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"Could not read {image_path}")
+                continue
+            idx = int(os.path.basename(image_path).replace(".png", "")) -1  # frame name to imu index -> frames start with 1, IMU with 0
+            pred, pred_dict = self.getPredictions(img, idx)
+
+            labels = self.getLabelsData(image_path)
+            labels_wo_gps = [x[:-1] for x in labels]
+            buoyLabels = [x[-1] for x in labels]
+            pred_dict["buoys_labeled"] = buoyLabels      
+
+            if self.plots:
+                self.distanceEstimator.plot_inference_results(pred, img, name=os.path.basename(image_path), 
+                                                                folder=self.plots_folder, labelsData=labels_wo_gps)
+                self.plot_Predictions(pred_dict, name = os.path.basename(image_path).replace(".png", ""), 
+                                            folder=self.plots_folder)
+
+    def getPredictions(self, img, frame_id):
+        # Arguments: Img as Pixel array and current frame_id 
+        # Function runs inference, returns Yolov7 preds concatenated with bearing 
+        # and prediction dict containing ship location,heading and bouy preds in lat, lng
+
         pred = self.distanceEstimator(img)
-        
         # get pixel center coordinates of BBs and compute lateral angle
         pred = self.getAnglesOfIncidence(pred)
         # compute buoy predictions
-        idx = int(os.path.basename(image_path).replace(".png", "")) -1  # frame name to imu index -> frames start with 1, IMU with 0
-        pred_dict = self.BuoyLocationPred(idx, pred)
-
-        labels = self.getLabelsData(image_path)
-        labels_wo_gps = [x[:-1] for x in labels]
-        buoyLabels = [x[-1] for x in labels]
-        pred_dict["buoys_labeled"] = buoyLabels
-        self.plot_Predictions(pred_dict, name = os.path.basename(image_path).replace(".png", ""), 
-                              folder="/home/marten/Uni/Semester_4/src/BuoyAssociation/detections")
- 
-        self.distanceEstimator.plot_inference_results(pred, img, name=os.path.basename(image_path), 
-                                                      folder="/home/marten/Uni/Semester_4/src/BuoyAssociation/detections", labelsData=labels_wo_gps)
-
+        pred_dict = self.BuoyLocationPred(frame_id, pred)
+        return pred, pred_dict
+        
     def getAnglesOfIncidence(self, preds):
         # function returns angle (radians) of deviation between optical axis of camera and object in x (horizontal) direction
         # concatenates prediction tensor with angle at last index -> tensor has shape [n, 8]
@@ -93,12 +106,6 @@ class BuoyAssociation():
             buoysLatLng.append((lat, lng))
 
         return {"buoy_predictions": buoysLatLng, "ship": [latCam, lngCam, heading]}
-        
-    def test_CS(self, x, y, z, heading):
-        T = T_ECEF_Ship(x, y, z, heading)
-        p_ship = np.array([500, 0, 0, 1])
-        p_ECEF = T @ p_ship
-        return ECEF2LatLng(p_ECEF[0], p_ECEF[1], p_ECEF[2])
 
     def getLabelsData(self, image_path):
         labelspath = os.path.join(labels_dir, os.path.basename(image_path) + ".json")
@@ -108,20 +115,29 @@ class BuoyAssociation():
             print(f"LablesFile not found: {labelspath}")
             return None
         
-    def getIMUData(self):
+    def getIMUData(self, path):
         # functino returns IMU data as list
-        files = os.listdir(imu_dir)
-        filename = [f for f in files if f.endswith('.txt')][0]
-        path = os.path.join(imu_dir, filename)
-        result = []
-        with open(path, 'r') as f:
-            data = f.readlines()
-            for line in data:
-                content = line.split(",")
-                line = [float(x) for x in content]
-                result.append(line)
-        if len(result) == 0:
-            print("No IMU data found, check path: {path}")
+        if os.path.isfile:
+            result = []
+            with open(path, 'r') as f:
+                data = f.readlines()
+                for line in data:
+                    content = line.split(",")
+                    line = [float(x) for x in content]
+                    result.append(line)
+        else:
+            files = os.listdir(imu_dir)
+            filename = [f for f in files if f.endswith('.txt')][0]
+            path = os.path.join(imu_dir, filename)
+            result = []
+            with open(path, 'r') as f:
+                data = f.readlines()
+                for line in data:
+                    content = line.split(",")
+                    line = [float(x) for x in content]
+                    result.append(line)
+            if len(result) == 0:
+                print("No IMU data found, check path: {path}")
         return result
     
     def plot_Predictions(self, data, name, folder):
@@ -232,4 +248,95 @@ class BuoyAssociation():
             pred = distEst(img)
             distEst.plot_inference_results(pred, img, image_name, labelsData=labels)
 
+    def create_run_directory(self, base_name="run", path=""):
+        i = 0
+        while True:
+            # Construct the folder name: 'run', 'run1', 'run2', etc.
+            folder_name = f"{base_name}{i if i > 0 else ''}"
+            
+            # Check if the folder exists
+            if not os.path.exists(os.path.join(path, folder_name)):
+                path_to_folder = os.path.join(path, folder_name)
+                # Create the folder if it doesn't exist
+                os.makedirs(path_to_folder)
+                print(f"Created directory: {path_to_folder} to store plots")
+                return path_to_folder
+            
+            # Increment the suffix if the folder exists
+            i += 1
+
+    def matching(self, preds, buoys_chart):
+        # function computes bipartite matching between chart buoys and predictions
+        # Arguments: lists of the form: [[lat,lon], [lat,lon], ...] for preds and buoys_chart
+        # construct bipartite graph G as 
+        G = {}
+        for i, pred in enumerate(preds):
+            edges = {}
+            for j, buoy in enumerate(buoys_chart):
+                # transofrom coordinates into ECEF to compute metric dist for each pair
+                d = haversineDist(buoy[0], buoy[1], pred[0], pred[1])
+                edges["B_" + str(j)] = int(d)
+            G["A_" + str(i)] = edges
+
+        matching_results = algorithm.find_matching(G, matching_type='min', return_type='list')
+        return matching_results
+
+    def processVideo(self, video_path, imu_path):
+        # load IMU data
+        self.imu_data = self.getIMUData(imu_path)
+
+        # load geodata
+        lat_start = self.imu_data[0][3]
+        lng_start = self.imu_data[0][4]
+        buoyCoords = self.BuoyCoordinates.getBuoyLocations(lat_start, lng_start)
+        self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
+
+        # Open the video file or camera stream
+        cap = cv2.VideoCapture(video_path)
+
+        # Check if the video opened successfully
+        if not cap.isOpened():
+            print("Error: Could not open video.")
+            exit()
+
+        # Loop to read frames
+        frame_id = 0
+        while cap.isOpened():
+            # Read a frame
+            ret, frame = cap.read()
+            if not ret:
+                break  # End of video
+            
+            # get predictions for frame
+            pred, pred_dict = self.getPredictions(frame, frame_id)
+
+            # check if buoydata needs to be reloaded
+            refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
+            if refresh:
+                # load new buoycoords in seperate thread 
+                print("refreshing buoy coords")
+                buoyCoords = threading.Thread(target=self.BuoyCoordinates.getBuoyLocations, 
+                                              args=(pred_dict["ship"][0], pred_dict["ship"][1],), daemon=True)
+            
+            #TODO
+            # extract relevant buoys for the current frame from the buoyCoords file
+            # pass extracted buoys and predictions to matching 
+            # display results by plotting or live rendering
+
+            # Display the frame (optional for real-time applications)
+            cv2.imshow("Frame", frame)
+
+            # Press 'q' to exit the loop
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+            frame_id += 1
+
+        # Release resources
+        cap.release()
+        cv2.destroyAllWindows()
+
 ba = BuoyAssociation()
+#ba.test()
+ba.processVideo(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", 
+                imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt")

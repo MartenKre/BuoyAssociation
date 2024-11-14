@@ -1,4 +1,5 @@
-detection/*
 *detections/
+__pycache__/
 *.mp4
 *.avi
+*.pdf

@@ -63,7 +63,7 @@ def exif_size(img):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', traintestval="train"):
+                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', traintestval="train", onnx=False):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
     with torch_distributed_zero_first(rank):
         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
@@ -76,7 +76,8 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                       pad=pad,
                                       image_weights=image_weights,
                                       prefix=prefix,
-                                      traintestval=traintestval)
+                                      traintestval=traintestval,
+                                      onnx=onnx)
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
@@ -353,7 +354,7 @@ def img2label_paths(img_paths):
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', traintestval="train"):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', traintestval="train", onnx=False):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -365,6 +366,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.path = path
         self.prefix = prefix
         self.traintestval = traintestval
+        self.onnx = onnx
         #self.albumentations = Albumentations() if augment else None
 
         try:
@@ -577,7 +579,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            img_copy = img
             img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
+            if self.onnx:   # if exporting to onnx, make sure img is square shaped
+                img, ratio, pad = letterbox(img_copy, new_shape=1024, auto=False, scaleup=False)  # Resize with padding
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
             labels = self.labels[index].copy()

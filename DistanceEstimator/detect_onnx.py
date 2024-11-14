@@ -1,7 +1,8 @@
 # Inference for ONNX model
 import cv2
 cuda = True
-w = r"C:\Users\ben93\PycharmProjects\yolov7\DL23\DL239\weights\best.onnx"
+# w = r"C:\Users\ben93\PycharmProjects\yolov7\DL23\DL239\weights\best.onnx"
+w = r"C:\Users\ben93\My Drive\Weights\distance\best.onnx"
 # img = cv2.imread('/content/yolov7/inference/images/horses.jpg')
 
 

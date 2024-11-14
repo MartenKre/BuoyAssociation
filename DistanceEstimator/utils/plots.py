@@ -10,13 +10,17 @@ from pathlib import Path
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.pyplot
+from matplotlib import ticker
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
 import yaml
+from tueplots.constants.color import rgb
 from PIL import Image, ImageDraw, ImageFont
 from scipy.signal import butter, filtfilt
+from scipy.stats import gaussian_kde
 
 from utils.general import xywh2xyxy, xyxy2xywh
 from utils.metrics import fitness
@@ -412,8 +416,8 @@ def plot_results(start=0, stop=0, bucket='', id=(), labels=(), save_dir=''):
     # Plot training 'results*.txt'. from utils.plots import *; plot_results(save_dir='runs/train/exp')
     fig, ax = plt.subplots(2, 5, figsize=(12, 6), tight_layout=True)
     ax = ax.ravel()
-    s = ['Box', 'Objectness', 'Classification', 'Precision', 'Recall',
-         'val Box', 'val Objectness', 'val Classification', 'mAP@0.5', 'mAP@0.5:0.95']
+    s = ['Box', 'Objectness', 'Distance', 'Precision', 'Recall',
+         'val Box', 'val Objectness', 'val Distance', 'mAP@0.5', 'mAP@0.5:0.95']
     if bucket:
         # files = ['https://storage.googleapis.com/%s/results%g.txt' % (bucket, x) for x in id]
         files = ['results%g.txt' % x for x in id]
@@ -424,7 +428,7 @@ def plot_results(start=0, stop=0, bucket='', id=(), labels=(), save_dir=''):
     assert len(files), 'No results.txt files found in %s, nothing to plot.' % os.path.abspath(save_dir)
     for fi, f in enumerate(files):
         try:
-            results = np.loadtxt(f, usecols=[2, 3, 4, 8, 9, 12, 13, 14, 10, 11], ndmin=2).T
+            results = np.loadtxt(f, usecols=[2, 3, 5, 9, 10, 13, 14, 16, 11, 12], ndmin=2).T
             n = results.shape[1]  # number of rows
             x = range(start, min(stop, n) if stop else n)
             for i in range(10):
@@ -498,3 +502,83 @@ def plot_skeleton_kpts(im, kpts, steps, orig_shape=None):
         if pos2[0] % 640 == 0 or pos2[1] % 640 == 0 or pos2[0]<0 or pos2[1]<0:
             continue
         cv2.line(im, pos1, pos2, (int(r), int(g), int(b)), thickness=2)
+
+
+def plot_dist_err(err_results, num_samples = None, labelX = 'GT - Distance [m]', labelY = r'$\varepsilon$', path='err_plot.png', color='blue'):
+    fig, ax = plt.subplots()
+    x = [(x[0] + x[1])/2 for x in err_results]
+    y = list(err_results.values())
+    bars = ax.bar(x, y, width = 30, color=color)
+    # Annotate each bar with the corresponding sample count
+    if num_samples is not None:
+        for bar, key in zip(bars, num_samples):
+            yval = bar.get_height()  # Get the height of the bar
+            plt.text(bar.get_x() + bar.get_width() / 2, yval, num_samples[key], ha='center', va='bottom')
+
+    ax.set_ylabel(labelY)
+    ax.set_xlabel(labelX)
+    plt.savefig(path)
+
+def plot_errors(errors, bins, max_dist, path):
+    # group errors into bins
+    delta = max_dist/(2*bins)
+    binIdx = [max_dist/bins * x - delta for x in range(1,bins+1)]
+    grouped_data = {k:[] for k in binIdx}
+    for gt, error in errors:
+        if gt <= max_dist:
+            i = np.argmin(list(map(lambda x: abs(gt-x), binIdx)))
+            grouped_data[binIdx[i]].append(error)   # append error to bin
+
+    Nmax = np.max([len(grouped_data[k]) for k in grouped_data])
+    np.random.seed(1)
+    u = np.random.rand(Nmax)
+
+    plotted_errors = np.concatenate(list(grouped_data.values()))
+
+    fig, ax = plt.subplots()
+
+    colorarr = [rgb.tue_blue, rgb.tue_red]
+
+    for count, k in enumerate(grouped_data):
+        ax.plot(grouped_data[k], 0.8 * u[:len(grouped_data[k])]+0.1+count, 'o', alpha = 0.5, color=colorarr[count%2], ms = 2, mec = 'none')
+        # perform kernel density estimation
+        if len(grouped_data[k]) > 1:
+            kde = gaussian_kde(grouped_data[k], bw_method='scott')  # 'scott' or 'silverman' are common choices for bandwidth
+            x_values = np.linspace(np.min(plotted_errors), np.max(plotted_errors), 1000)
+            kde_values = kde(x_values)
+            # normalize kde between 0-1
+            kde_values = 0.8 * kde_values / np.max(kde_values) +0.1+count
+            ax.plot(x_values, kde_values, color = rgb.tue_dark, alpha = 0.9, linewidth=0.7, linestyle='dashed')
+
+
+    ax.set_yticks([x+0.5 for x in range(0, count+1)])
+    ax.set_yticklabels([f"[{int(k-delta)}, {int(k+delta)})" for k in grouped_data], rotation=90, va="center", fontsize=7)
+
+    for y,n in zip([0+x for x in range(0, count+1)], [len(grouped_data[k]) for k in grouped_data]):
+        ax.axhline(y, color = rgb.tue_dark, alpha = 0.5)
+        t = ax.text(np.max(plotted_errors), y + 0.5, str(n).rjust(3," ") + " samples", color = rgb.tue_dark, va='center', ha = 'right', fontsize = "x-small")
+        t.set_bbox(dict(facecolor='white', alpha=1.0, linewidth=0, pad=1.0))
+
+    ax.vlines(x=0, ymin=0, ymax=count+1, colors=rgb.tue_darkgreen, linestyles='dashed', alpha=1, linewidth=1)
+    ax.set_ylabel("Distance Bins")
+    ax.set_xlabel("pred - target [m]")
+    ax.set_ylim(0, count+1)
+
+    ax.set_title("Distance Prediction Errors")
+
+    plt.savefig(path)
+
+def plot_dist_pred(data, path):
+    fig, ax = plt.subplots()
+    for x in data:
+        if x[0] < x[1]:
+            ax.plot(x[0], x[1], 'o', alpha=0.6, color=rgb.tue_blue, markersize=3, mec='none')
+        else:
+            ax.plot(x[0], x[1], 'o', alpha=0.6, color=rgb.tue_red, markersize=3, mec='none')
+    data = np.asarray(data) 
+    ax.plot([0,np.max(data[:,0])], [0,np.max(data[:,0])], linestyle='--', color=rgb.tue_darkgreen, 
+            alpha = 1)
+    ax.set_ylabel("Prediction [m]")
+    ax.set_xlabel("Ground Truth Distance [m]")
+    plt.savefig(path)
+    

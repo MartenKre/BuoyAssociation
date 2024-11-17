@@ -7,11 +7,11 @@ import torch
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
+import threading
+from scipy.optimize import linear_sum_assignment
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
 from utility.GeoData import GetGeoData
-from hungarian_algorithm import algorithm
-import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 
@@ -23,20 +23,19 @@ labels_dir = os.path.join(test_folder, 'labels')
 imu_dir = os.path.join(test_folder, 'imu') 
 
 class BuoyAssociation():
-    def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080], plots = True):
+    def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
         self.distanceEstimator = DistanceEstimator(conv_thresh = 0.4, iou_thresh = 0.3)    # load Yolov7 with Distance Module, iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
-        self.imu_data = None
-        self.plots = plots
-        if self.plots == True:
-            self.plots_folder = self.create_run_directory(path="detections/")
+        self.imu_data = None 
 
-    def test(self):
+    def test(self, plots=True):
         # function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
         # plots will include distance GT and GT buoy positions
+        if plots:
+            plots_folder = self.create_run_directory(path="detections/")
         self.imu_data = self.getIMUData(imu_dir)   # load IMU data
 
         for image in os.listdir(images_dir):   
@@ -54,17 +53,16 @@ class BuoyAssociation():
             buoyLabels = [x[-1] for x in labels]
             pred_dict["buoys_labeled"] = buoyLabels      
 
-            if self.plots:
+            if plots:
                 self.distanceEstimator.plot_inference_results(pred, img, name=os.path.basename(image_path), 
-                                                                folder=self.plots_folder, labelsData=labels_wo_gps)
+                                                                folder=plots_folder, labelsData=labels_wo_gps)
                 self.plot_Predictions(pred_dict, name = os.path.basename(image_path).replace(".png", ""), 
-                                            folder=self.plots_folder)
+                                            folder=plots_folder)
 
     def getPredictions(self, img, frame_id):
         # Arguments: Img as Pixel array and current frame_id 
         # Function runs inference, returns Yolov7 preds concatenated with bearing 
         # and prediction dict containing ship location,heading and bouy preds in lat, lng
-
         pred = self.distanceEstimator(img)
         # get pixel center coordinates of BBs and compute lateral angle
         pred = self.getAnglesOfIncidence(pred)
@@ -117,7 +115,7 @@ class BuoyAssociation():
         
     def getIMUData(self, path):
         # functino returns IMU data as list
-        if os.path.isfile:
+        if os.path.isfile(path):
             result = []
             with open(path, 'r') as f:
                 data = f.readlines()
@@ -176,6 +174,7 @@ class BuoyAssociation():
         # Customize the view
         ax.set_xlim(-100, 700)
         ax.set_ylim(-400, 400)
+        ax.set_zlim(0, 1)
         #ax.set_zlim(-1, 1)  # Keep it flat in the Z-axis for an XY view
 
         if len(buoy_preds) > 0:
@@ -268,18 +267,41 @@ class BuoyAssociation():
     def matching(self, preds, buoys_chart):
         # function computes bipartite matching between chart buoys and predictions
         # Arguments: lists of the form: [[lat,lon], [lat,lon], ...] for preds and buoys_chart
-        # construct bipartite graph G as 
-        G = {}
-        for i, pred in enumerate(preds):
-            edges = {}
-            for j, buoy in enumerate(buoys_chart):
-                # transofrom coordinates into ECEF to compute metric dist for each pair
-                d = haversineDist(buoy[0], buoy[1], pred[0], pred[1])
-                edges["B_" + str(j)] = int(d)
-            G["A_" + str(i)] = edges
+        G = []  # cost matrix
+        for pred in preds:
+            edges = list(map(lambda x: int(haversineDist(*x, *pred)), buoys_chart))
+            G.append(edges)
 
-        matching_results = algorithm.find_matching(G, matching_type='min', return_type='list')
-        return matching_results
+        G = np.asarray(G)
+        row_ind, col_ind = linear_sum_assignment(G)     # run hungarian algorithm
+        result = [(a,b) for a,b in zip(row_ind, col_ind)]   # create tuples of matched indices
+        return result
+
+    def getNearbyBuoys(self, ship_pose, buoyCoords, fov_with_padding=100, dist_thresh=1200, nearby_thresh=50):
+        # function selects nearby buoys (relative to ship pos) from a list containing buoy Coordinates
+        # fov with padding specifies horizontal fov of cam (95) with additional padding of 2.5 on both sides 
+        # dist_thresh: if bouy exceeds this, it will not be included
+        # nearby_thresh: even if bouy is not in fov it will still be included if inside this thresh -> chart data inaccuracies
+        selected_buoys = []
+        # compute transformation matrix from ecef to ship cs
+        x, y, z = LatLng2ECEF(ship_pose[0], ship_pose[1])  # ship coords in ECEF
+        Ship_T_ECEF = np.linalg.pinv(T_ECEF_Ship(x,y,z,ship_pose[2]))   # transformation matrix between ship and ecef
+
+        for buoy in buoyCoords:
+            lat = buoy["geometry"]["coordinates"][1]
+            lng = buoy["geometry"]["coordinates"][0]
+            x,y,z = LatLng2ECEF(lat, lng)
+            pos_bouy = Ship_T_ECEF @ np.array([x,y,z,1]) # transform buoys from ecef to ship cs
+            bearing = np.arctan2(pos_bouy[1],pos_bouy[0])   # compute bearing of buoy
+            dist_to_ship = haversineDist(lat, lng, ship_pose[0], ship_pose[1])  # compute dist to ship
+            if abs(bearing) <= fov_with_padding and dist_to_ship <= dist_thresh:
+                # include buoys that are within fov+padding and inside maxdist
+                selected_buoys.append([lat, lng])
+            elif dist_to_ship <= nearby_thresh:
+                # also include nearby buoys not inside FOV
+                selected_buoys.append([lat, lng])
+
+        return selected_buoys
 
     def processVideo(self, video_path, imu_path):
         # load IMU data
@@ -291,7 +313,6 @@ class BuoyAssociation():
         buoyCoords = self.BuoyCoordinates.getBuoyLocations(lat_start, lng_start)
         self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
 
-        # Open the video file or camera stream
         cap = cv2.VideoCapture(video_path)
 
         # Check if the video opened successfully
@@ -299,16 +320,16 @@ class BuoyAssociation():
             print("Error: Could not open video.")
             exit()
 
-        # Loop to read frames
         frame_id = 0
         while cap.isOpened():
-            # Read a frame
             ret, frame = cap.read()
             if not ret:
                 break  # End of video
             
             # get predictions for frame
             pred, pred_dict = self.getPredictions(frame, frame_id)
+            # draw BBs on frame
+            self.distanceEstimator.drawBoundingBoxes(frame, pred)
 
             # check if buoydata needs to be reloaded
             refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
@@ -318,10 +339,13 @@ class BuoyAssociation():
                 buoyCoords = threading.Thread(target=self.BuoyCoordinates.getBuoyLocations, 
                                               args=(pred_dict["ship"][0], pred_dict["ship"][1],), daemon=True)
             
-            #TODO
             # extract relevant buoys for the current frame from the buoyCoords file
-            # pass extracted buoys and predictions to matching 
-            # display results by plotting or live rendering
+            filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
+            if len(filteredBuoys) > 0:
+                # pass extracted buoys and predictions to matching 
+                matching_results = self.matching(pred_dict["buoy_predictions"], filteredBuoys)
+                
+                # display results by plotting or live rendering
 
             # Display the frame (optional for real-time applications)
             cv2.imshow("Frame", frame)
@@ -338,5 +362,5 @@ class BuoyAssociation():
 
 ba = BuoyAssociation()
 #ba.test()
-ba.processVideo(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", 
-                imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt")
+ba.processVideo(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt")
+#ba.testmatching()

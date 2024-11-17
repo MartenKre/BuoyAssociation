@@ -9,6 +9,7 @@ from models.experimental import attempt_load
 from utils.general import non_max_suppression, scale_coords, box_iou
 from utils.datasets import letterbox
 from utils.plots import plot_one_box
+from detect import get_color_based_on_distance
 
 
 class DistanceEstimator():
@@ -73,6 +74,23 @@ class DistanceEstimator():
         img_path = os.path.join(folder, name)
         cv2.imwrite(img_path, img)
         print(f"Image saved to: {img_path}")
+
+    def drawBoundingBoxes(self, img, preds, conf_thresh = 0.25):
+        # Function draws bounding boxed on a live frame
+        #print(preds) 
+        for BB in preds:
+            #print("-----------------")
+            #print(BB)
+            x,y,w,h,conf,cls,dist=BB[:7]
+            print(conf)
+            if conf > conf_thresh:
+                annotation = f"{conf:.2f}, {int(dist)}"
+                color = get_color_based_on_distance(dist)
+                if color == (0, 250, 250):
+                    txtcolor = [0, 0, 0]
+                else:
+                    txtcolor = [255,255,255]
+                plot_one_box([x,y,w,h], img, color=color, textcolor=txtcolor, label=annotation)
 
     def createDir(self, name):
         script_path = os.path.abspath(__file__)

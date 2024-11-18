@@ -330,6 +330,7 @@ class BuoyAssociation():
             pred, pred_dict = self.getPredictions(frame, frame_id)
             # draw BBs on frame
             self.distanceEstimator.drawBoundingBoxes(frame, pred)
+            # TODO render ship and path & buoy preds & all buoyCoords buoys
 
             # check if buoydata needs to be reloaded
             refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
@@ -341,11 +342,12 @@ class BuoyAssociation():
             
             # extract relevant buoys for the current frame from the buoyCoords file
             filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
-            if len(filteredBuoys) > 0:
+            if len(filteredBuoys) > 0 and len(pred_dict["buoy_predictions"]) > 0:
                 # pass extracted buoys and predictions to matching 
                 matching_results = self.matching(pred_dict["buoy_predictions"], filteredBuoys)
-                
-                # display results by plotting or live rendering
+                # TODO display results by plotting or live rendering
+                # redraw matched BBs with other color
+                # render matched buoys & filtered buoys
 
             # Display the frame (optional for real-time applications)
             cv2.imshow("Frame", frame)
@@ -363,4 +365,3 @@ class BuoyAssociation():
 ba = BuoyAssociation()
 #ba.test()
 ba.processVideo(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt")
-#ba.testmatching()

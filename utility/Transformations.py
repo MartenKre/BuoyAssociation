@@ -104,3 +104,14 @@ def T_W_Ship(pos, heading):
     T[:3, :3] = R
     T[:3, 3] = pos
     return T
+
+def extract_RPY(R):
+    # extracts roll, pitch yaw from 3x3 rotation matrix
+    # returns rpy in radians
+    R = np.asarray(R)
+
+    yaw=np.arctan2(R[1,0],R[0,0])
+    pitch=np.arctan2(-R[2,0],np.sqrt(R[2,1]**2+R[2,2]**2))
+    roll=np.arctan2(R[2,1],R[2,2])
+
+    return roll, pitch, yaw

@@ -4,6 +4,7 @@
 - Get angle between principal ray of ship and buoy (from pixel space)
 - With angle and dist information transform buoy from camera cs to global cs
 - perform matching
+- filter matching results e.g. based on conf and/or dist to matched gt buoy
 
 Additional tasks:
 - add object tracking

@@ -233,6 +233,19 @@ class BuoyAssociation():
         plt.title("Ship and Buoy Positions")
         path = os.path.join(folder, name+"_buoys.pdf")
         plt.savefig(path)
+
+    def getColor(self, i):
+        # returns color (Tuple RGBA normalized) from colortable based in argument i
+        color_table = [(255/255, 255/255, 0, 1),
+                       (102/255, 0, 102/255, 1),
+                       (0, 255/255, 255/255, 1),
+                       (255/255, 153/255, 255/255),
+                       (153/255, 102/255, 51/255),
+                       (255/255,153/155, 0, 1),
+                       (224/255, 224/255, 224/255, 1),
+                       (128/255, 128/255, 0, 1)
+                       ]
+        return color_table[i%len(color_table)]
     
     def inference_with_test_data(self):
         distEst = DistanceEstimator()
@@ -252,26 +265,21 @@ class BuoyAssociation():
     def create_run_directory(self, base_name="run", path=""):
         i = 0
         while True:
-            # Construct the folder name: 'run', 'run1', 'run2', etc.
             folder_name = f"{base_name}{i if i > 0 else ''}"
-            
-            # Check if the folder exists
             if not os.path.exists(os.path.join(path, folder_name)):
                 path_to_folder = os.path.join(path, folder_name)
-                # Create the folder if it doesn't exist
                 os.makedirs(path_to_folder)
                 print(f"Created directory: {path_to_folder} to store plots")
                 return path_to_folder
-            
-            # Increment the suffix if the folder exists
             i += 1
-
+    
     def matching(self, preds, buoys_chart):
         # function computes bipartite matching between chart buoys and predictions
         # Arguments: lists of the form: [[lat,lon], [lat,lon], ...] for preds and buoys_chart
+        # returns list of tuples of matched indices [(a,b), (c,d)], where a is index of gt and b of pred
         G = []  # cost matrix
-        for pred in preds:
-            edges = list(map(lambda x: int(haversineDist(*x, *pred)), buoys_chart))
+        for buoy in buoys_chart:
+            edges = list(map(lambda x: int(haversineDist(*x, *buoy)), preds))
             G.append(edges)
 
         G = np.asarray(G)
@@ -350,7 +358,8 @@ class BuoyAssociation():
             # get predictions for frame
             pred, pred_dict = self.getPredictions(frame, frame_id)
             # draw BBs on frame
-            self.distanceEstimator.drawBoundingBoxes(frame, pred)
+            if not rendering:
+                self.distanceEstimator.drawBoundingBoxes(frame, pred)
 
             # check if buoydata needs to be reloaded
             refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
@@ -363,17 +372,26 @@ class BuoyAssociation():
             
             # extract relevant buoys for the current frame from the buoyCoords file
             filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
+            matching_results = []
             if len(filteredBuoys) > 0 and len(pred_dict["buoy_predictions"]) > 0:
                 # pass extracted buoys and predictions to matching 
                 matching_results = self.matching(pred_dict["buoy_predictions"], filteredBuoys)
-                # TODO display results by plotting or live rendering
+
+                # TODO display matched buoys with different color & also redraw BBs in that color
                 # redraw matched BBs with other color
 
             if rendering:
+                color_dict_preds = {}
+                color_dict_gt = {}
+                for i, m in enumerate(matching_results):
+                    color = self.getColor(i)
+                    color_dict_preds[m[1]] = color
+                    color_dict_gt[m[0]] = color
+                    self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
                 with lock:
                     self.RenderObj.setShipData(*pred_dict["ship"])
-                    self.RenderObj.setPreds(pred_dict["buoy_predictions"])
-                    self.RenderObj.setBuoyGT(filteredBuoys)
+                    self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
+                    self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
 
             # Display the frame (optional for real-time applications)
             cv2.imshow("Frame", frame)

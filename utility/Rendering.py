@@ -1,6 +1,6 @@
 from direct.showbase.ShowBase import ShowBase
 from panda3d.core import DirectionalLight, PointLight, AmbientLight, AntialiasAttrib
-from panda3d.core import Vec3, LineSegs, NodePath
+from panda3d.core import Vec3, LineSegs, NodePath, Material
 from panda3d.core import *
 import numpy as np
 from utility.Transformations import T_W_Ship, LatLng2ECEF, T_ECEF_Ship, extract_RPY
@@ -32,6 +32,8 @@ class RenderAssociations(ShowBase):
         self.counter = 0    # frame counter
         self.preds=[]   # list to store buoy preds for current frame    
         self.buoysGT = []   # list to store buoy GTs
+        self.matchingColorsGT = {}
+        self.matchingColorsPreds = {}
 
         # transformation matrices -> need to be initialized
         self.W_T_Ship = None    # Matrix to transform ship coords to World CS (determined by init pos & heading)
@@ -97,14 +99,6 @@ class RenderAssociations(ShowBase):
         self.W_T_Ship = T_W_Ship(np.array([0, 0, -3.8]), heading)
         self.ship_path.append(np.array([0, 0, -3.8]))
 
-    def setPreds(self, preds):
-        # list of buoy preds (lat&lng coords)
-        self.preds = []
-        for pred in preds:
-            x,y,z = LatLng2ECEF(pred[0], pred[1])
-            p_buoy = np.linalg.pinv(self.ECEF_T_W) @ np.array([x,y,z,1])  # buoy pred in ship CS
-            self.preds.append([p_buoy[0], p_buoy[1]])
-    
     def setShipData(self, lat, lng, heading):
         # current pos and heading of ship
         x, y, z = LatLng2ECEF(lat, lng)
@@ -113,14 +107,24 @@ class RenderAssociations(ShowBase):
         self.ship_path.append(p_WCS[0:3])
         self.W_T_Ship = T_W_Ship(p_WCS[:3], np.radians(heading))
 
-    def setBuoyGT(self, buoysGT):
+    def setPreds(self, preds, matching_indices={}):
+        # list of buoy preds (lat&lng coords)
+        self.preds = []
+        for pred in preds:
+            x,y,z = LatLng2ECEF(pred[0], pred[1])
+            p_buoy = np.linalg.pinv(self.ECEF_T_W) @ np.array([x,y,z,1])  # buoy pred in ship CS
+            self.preds.append([p_buoy[0], p_buoy[1]])
+            self.matchingColorsPreds = matching_indices
+
+    def setBuoyGT(self, buoysGT, matching_indices={}):
         # list of buoy gt data (lat & lng coords)
+        # optional: dict of matched indices with color RGBA e.g. {3:(0,0,1,0), 5:{1,1,0,1}}
         self.buoysGT = []
-        i = 1
         for buoy in buoysGT:
             x,y,z = LatLng2ECEF(buoy[0], buoy[1])
             p_buoy = np.linalg.pinv(self.ECEF_T_W) @ np.array([x,y,z,1])  # buoy pred in ship CS
             self.buoysGT.append([p_buoy[0], p_buoy[1]])
+            self.matchingColorsGT = matching_indices
         
     def renderShipIcon(self):
         # render ship icon
@@ -160,8 +164,16 @@ class RenderAssociations(ShowBase):
             self.pred_buoys_render.pop()
 
     def renderBuoyGT(self):
-        for x, y in self.buoysGT:
+        for i, (x, y) in enumerate(self.buoysGT):
             buoy = deepcopy(self.buoy_model_green)
+
+            if i in self.matchingColorsGT:
+                color = self.matchingColorsGT[i]
+                myMaterial = Material()
+                myMaterial.setAmbient(color) # Make this material blue
+                myMaterial.setDiffuse(color)
+                buoy.setMaterial(myMaterial, priority=1)
+
             buoy.setScale(8, 8, 8)
             buoy.setPos(x, y, -2.5)
             p = 3 * np.sin(1.5*self.t)
@@ -179,8 +191,16 @@ class RenderAssociations(ShowBase):
 
     def renderBuoyPreds(self):
         # the predictions are expected to be in lat lon coords
-        for x, y in self.preds:
+        for i, (x, y) in enumerate(self.preds):
             buoy = deepcopy(self.buoy_model_red)
+
+            if i in self.matchingColorsPreds:
+                color = self.matchingColorsPreds[i]
+                myMaterial = Material()
+                myMaterial.setAmbient(color) # Make this material blue
+                myMaterial.setDiffuse(color)
+                buoy.setMaterial(myMaterial, priority=1)
+
             buoy.setScale(8, 8, 8)
             p = 3 * np.sin(1.5*self.t+1.5)
             r = 1.5 * np.sin(1*self.t+1.5)

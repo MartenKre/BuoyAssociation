@@ -77,12 +77,8 @@ class DistanceEstimator():
 
     def drawBoundingBoxes(self, img, preds, conf_thresh = 0.25):
         # Function draws bounding boxed on a live frame
-        #print(preds) 
         for BB in preds:
-            #print("-----------------")
-            #print(BB)
             x,y,w,h,conf,cls,dist=BB[:7]
-            print(conf)
             if conf > conf_thresh:
                 annotation = f"{conf:.2f}, {int(dist)}"
                 color = get_color_based_on_distance(dist)

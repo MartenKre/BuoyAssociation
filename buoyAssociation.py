@@ -12,6 +12,7 @@ from scipy.optimize import linear_sum_assignment
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
 from utility.GeoData import GetGeoData
+from utility.Rendering import RenderAssociations
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 
@@ -30,6 +31,7 @@ class BuoyAssociation():
         self.distanceEstimator = DistanceEstimator(conv_thresh = 0.4, iou_thresh = 0.3)    # load Yolov7 with Distance Module, iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
         self.imu_data = None 
+        self.RenderObj = None
 
     def test(self, plots=True):
         # function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -296,14 +298,33 @@ class BuoyAssociation():
             dist_to_ship = haversineDist(lat, lng, ship_pose[0], ship_pose[1])  # compute dist to ship
             if abs(bearing) <= fov_with_padding and dist_to_ship <= dist_thresh:
                 # include buoys that are within fov+padding and inside maxdist
-                selected_buoys.append([lat, lng])
+                selected_buoys.append((lat, lng))
             elif dist_to_ship <= nearby_thresh:
                 # also include nearby buoys not inside FOV
-                selected_buoys.append([lat, lng])
+                selected_buoys.append((lat, lng))
 
-        return selected_buoys
+        return list(set(selected_buoys))
 
-    def processVideo(self, video_path, imu_path):
+    def video(self, video_path, imu_path, rendering=False):
+        # run buoy association on video
+        if not rendering:
+           self.processVideo(video_path, imu_path, rendering) 
+        else:
+            # initialize Rendering Framework with data
+            lock = threading.Lock()
+            self.RenderObj = RenderAssociations(lock)
+            self.imu_data = self.getIMUData(imu_path)
+            lat_start = self.imu_data[0][3]
+            lng_start = self.imu_data[0][4]
+            heading_start = self.imu_data[0][2]
+            self.RenderObj.initTransformations(lat_start, lng_start, heading_start) # initialize Transformation Matrices with pos & heading of first frame
+            # start thread to run video processing 
+            processing_thread = threading.Thread(target=self.processVideo, args=(video_path, imu_path, rendering,lock,), daemon=True)
+            processing_thread.start()
+            # start rendering
+            self.RenderObj.run()
+            
+    def processVideo(self, video_path, imu_path, rendering, lock):     
         # load IMU data
         self.imu_data = self.getIMUData(imu_path)
 
@@ -330,7 +351,6 @@ class BuoyAssociation():
             pred, pred_dict = self.getPredictions(frame, frame_id)
             # draw BBs on frame
             self.distanceEstimator.drawBoundingBoxes(frame, pred)
-            # TODO render ship and path & buoy preds & all buoyCoords buoys
 
             # check if buoydata needs to be reloaded
             refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
@@ -339,6 +359,7 @@ class BuoyAssociation():
                 print("refreshing buoy coords")
                 buoyCoords = threading.Thread(target=self.BuoyCoordinates.getBuoyLocations, 
                                               args=(pred_dict["ship"][0], pred_dict["ship"][1],), daemon=True)
+                buoyCoords.start()
             
             # extract relevant buoys for the current frame from the buoyCoords file
             filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
@@ -347,7 +368,12 @@ class BuoyAssociation():
                 matching_results = self.matching(pred_dict["buoy_predictions"], filteredBuoys)
                 # TODO display results by plotting or live rendering
                 # redraw matched BBs with other color
-                # render matched buoys & filtered buoys
+
+            if rendering:
+                with lock:
+                    self.RenderObj.setShipData(*pred_dict["ship"])
+                    self.RenderObj.setPreds(pred_dict["buoy_predictions"])
+                    self.RenderObj.setBuoyGT(filteredBuoys)
 
             # Display the frame (optional for real-time applications)
             cv2.imshow("Frame", frame)
@@ -364,4 +390,4 @@ class BuoyAssociation():
 
 ba = BuoyAssociation()
 #ba.test()
-ba.processVideo(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt")
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)

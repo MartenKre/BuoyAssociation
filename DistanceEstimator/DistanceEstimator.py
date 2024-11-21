@@ -28,6 +28,7 @@ class DistanceEstimator():
     def __call__(self, img):
         # runs inference of given image
         # image will be resized to self.img_size and normalized
+        # returns pred tensors of format [Nx[xyxy,conf,cls,dist]]
 
         # pre processing
         img_resized, ratio, pad = letterbox(img, new_shape=(self.img_size, self.img_size), auto=False, scaleup=False, stride=32) # Resize with padding
@@ -172,4 +173,3 @@ class DistanceEstimator():
                     latlng = None
                 result.append([cls, x_cetner, y_center, width_BB, height_BB, dist, latlng])
         return result
-

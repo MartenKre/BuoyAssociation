@@ -167,6 +167,7 @@ class RenderAssociations(ShowBase):
         for i, (x, y) in enumerate(self.buoysGT):
             buoy = deepcopy(self.buoy_model_green)
 
+            color = (0,1,0,1)
             if i in self.matchingColorsGT:
                 color = self.matchingColorsGT[i]
                 myMaterial = Material()
@@ -183,7 +184,7 @@ class RenderAssociations(ShowBase):
             buoy.reparentTo(self.render)
             self.gt_buoys_render.append(buoy)
             plight = PointLight("plight")
-            plight.setColor((0, 1, 0, 1))
+            plight.setColor(color)
             plight.attenuation = (0.6, 0, 0.0005)
             plnp = buoy.attachNewNode(plight)
             self.buoy_lights.append(plnp)
@@ -194,6 +195,7 @@ class RenderAssociations(ShowBase):
         for i, (x, y) in enumerate(self.preds):
             buoy = deepcopy(self.buoy_model_red)
 
+            color = (1,0,0,1)
             if i in self.matchingColorsPreds:
                 color = self.matchingColorsPreds[i]
                 myMaterial = Material()
@@ -210,7 +212,7 @@ class RenderAssociations(ShowBase):
             self.pred_buoys_render.append(buoy)
 
             plight = PointLight("plight")
-            plight.setColor((1, 0, 0, 1))
+            plight.setColor(color)
             plight.attenuation = (0.5, 0, 0.0005)
             plnp = buoy.attachNewNode(plight)
             self.buoy_lights.append(plnp)

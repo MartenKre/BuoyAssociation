@@ -28,6 +28,7 @@ class BuoyAssociation():
         self.imu_data = None
         self.RenderObj = None   # render Instance
         self.MOT = self.initBoxMOT()         # Multi Object Tracker Instance
+        self.ma_storage = {}    # dict to store moving averages
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
         #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -44,7 +45,7 @@ class BuoyAssociation():
                 print(f"Could not read {image_path}")
                 continue
             idx = int(os.path.basename(image_path).replace(".png", "")) -1  # frame name to imu index -> frames start with 1, IMU with 0
-            pred, pred_dict = self.getPredictions(img, idx)
+            pred, pred_dict = self.getPredictions(img, idx, moving_average=False)
 
             labels = self.getLabelsData(labels_dir, image_path)
             labels_wo_gps = [x[:-1] for x in labels]
@@ -57,19 +58,33 @@ class BuoyAssociation():
                 self.plot_Predictions(pred_dict, name = os.path.basename(image_path).replace(".png", ""), 
                                             folder=plots_folder)
 
-    def getPredictions(self, img, frame_id):
-        """Function runs inferense, return Yolov7 preds concatenated with bearing to Objects 
-        and prediction dict containing ship pose and predicted buoy positions (in lat,lng)
+    def getPredictions(self, img, frame_id, moving_average=True):
+        """Function runs inferense, returns Yolov7 preds concatenated with bearing to Objects & ID of BoxMOT
+        Prediction dict contains ship pose and predicted buoy positions (in lat,lng)
         Args:
             Img: pixel array
             frame_id: current frame ID
         Returns:
-            preds: (n,8) tensor [xyxy, conf, cls, dist, angle]
+            preds: (n,8) tensor [xyxy, conf, cls, dist, angle, ID]
             pred_dict dict containing "ship": [lat, lng, heading] and "buoy_predictions": [[lat1,lng1], ...]
         """
 
         pred = self.distanceEstimator(img)
         pred = self.getAnglesOfIncidence(pred)  # get pixel center coordinates of BBs and compute lateral angle
+        
+        # BoxMOT tracking on predictions
+        preds_boxmot_format = pred[:,0:6]    # preds need to be in format [xyxy, conf, classID]
+        preds_boxmot_format = np.array(preds_boxmot_format)
+        res = self.MOT.update(preds_boxmot_format, img)   # res --> M X (x, y, x, y, id, conf, cls, ind)
+        res = torch.from_numpy(res)
+        ids = -1*torch.ones(size=(pred.size()[0], 1))   # default case -1
+        if len(res) > 0:
+            ids[res[:,-1].to(torch.int32), 0] = res[:, 4].to(torch.float)
+        pred = torch.cat((pred, ids), dim=-1)   # pred = [N x [xyxy,conf,classID,dist,angle,ID]]
+
+        if moving_average:
+            pred = self.moving_average(pred, method='EMA')
+
         pred_dict = self.BuoyLocationPred(frame_id, pred)   # compute buoy predictions
         return pred, pred_dict
         
@@ -86,6 +101,56 @@ class BuoyAssociation():
         alpha = -1*torch.arctan((x)/self.focal_length).unsqueeze(1)
         preds = torch.cat((preds, alpha), dim=-1)
         return preds
+    
+    def moving_average(self, preds, method='UEMA'):
+        """Computes moving average over dist predictions specified by method
+        Args:
+            preds: prediction tensor with ID at last pos [N x [xyxy,conf,class,dist,angle,ID]]
+            method: EMA (Exp Moving Average), UEMA (Unbiased Exp Moving Average), WMA (Window Moving average) 
+
+        Returns:
+            prediction tensor with dist values modified in place -> [N x [xyxy,conf,class,dist,angle,ID]]
+        """
+
+        # EMA / UEMA Parameters
+        alpha = 0.9
+
+        # Window Size
+        w_sz = 10
+
+        for pred in preds:
+            id = int(pred[-1])
+            if id == -1:
+                continue    # if no id has been assigned to BB, keep dist prediction
+            if id in self.ma_storage:
+                if method == 'EMA':
+                    self.ma_storage[id] = alpha * self.ma_storage[id] + (1-alpha) * pred[6] # compute EMA
+                    pred[6] = self.ma_storage[id]
+                elif method == 'UEMA':
+                    self.ma_storage[id]['S'] = alpha * self.ma_storage[id]['S'] + pred[6] # compute EMA
+                    i = self.ma_storage[id]['n']
+                    pred[6] = (1-alpha) / (1 - alpha**(i+1)) * self.ma_storage[id]['S']
+                    self.ma_storage[id]['n'] += 1
+                elif method == 'WMA':
+                    self.ma_storage[id].append(pred[6])
+                    if len(self.ma_storage[id]) > w_sz:
+                        self.ma_storage[id].pop(0)
+                    print(id, int(pred[6]),  "/",  int(sum(self.ma_storage[id]) / len(self.ma_storage[id])))
+                    pred[6] = sum(self.ma_storage[id]) / len(self.ma_storage[id])
+                else:
+                    raise ValueError("Method {method} not defined")
+            else:
+                if method == 'EMA':
+                    self.ma_storage[id] = pred[6]
+                elif method == 'UEMA':
+                    self.ma_storage[id] = {'n': 1, 'S': pred[6]}
+                elif method == 'WMA':
+                    self.ma_storage[id] = [pred[6]]
+                else:
+                    raise ValueError("Method {method} not defined")
+
+        return preds
+
     
     def BuoyLocationPred(self, frame_id, preds):
         """for each BB prediction function computes the Buoy Location based on Dist & Angle of the tensor
@@ -105,8 +170,8 @@ class BuoyAssociation():
         ECEF_T_Ship = T_ECEF_Ship(x,y,z,heading)   # transformation matrix between ship and ecef
 
         # compute 2d points (x,y) in ship cs, (z=0, since all objects are on water surface)
-        buoysX = (torch.cos(preds[:,-1]) * preds[:,-2]).tolist()
-        buoysY = (torch.sin(preds[:,-1]) * preds[:,-2]).tolist()
+        buoysX = (torch.cos(preds[:,7]) * preds[:,6]).tolist()
+        buoysY = (torch.sin(preds[:,7]) * preds[:,6]).tolist()
         buoy_preds = list(zip(buoysX, buoysY))
 
         # transform buoyCoords to lat lng
@@ -378,15 +443,8 @@ class BuoyAssociation():
                 break  # End of video
             
             # get predictions for frame
-            pred, pred_dict = self.getPredictions(frame, frame_id)
+            pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
 
-            # BoxMOT tracking on predictions
-            preds_boxmot_format = pred[:,0:6]    # preds need to be in format [xyxy, conf, classID]
-            preds_boxmot_format = np.array(preds_boxmot_format)
-            res = self.MOT.update(preds_boxmot_format, frame)   # res --> M X (x, y, x, y, id, conf, cls, ind)
-            print(res)
-            print("-------------------------")
-            self.MOT.plot_results(frame, show_trajectories=True)
 
             # draw BBs on frame
             if not rendering:
@@ -418,14 +476,14 @@ class BuoyAssociation():
                     color = self.getColor(i)
                     color_dict_preds[m[1]] = color
                     color_dict_gt[m[0]] = color
-                    #self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
+                    self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
                 with lock:
                     self.RenderObj.setShipData(*pred_dict["ship"])
                     self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
                     self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
 
             # Display the frame (optional for real-time applications)
-            cv2.imshow("Frame", frame)
+            cv2.imshow("Buoy Association", frame)
 
             # Press 'q' to exit the loop
             if cv2.waitKey(1) & 0xFF == ord('q'):

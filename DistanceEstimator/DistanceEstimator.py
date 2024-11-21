@@ -13,13 +13,11 @@ from detect import get_color_based_on_distance
 
 
 class DistanceEstimator():
-    def __init__(self, weights = '', img_size=1024, 
+    def __init__(self, weights='', img_size=1024, 
                  conv_thresh=0.4, iou_thresh=0.5):
-        if weights != '':
-            self.checkPath(weights)
-            self.model = attempt_load(weights, map_location='cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.model = attempt_load('DistanceEstimator/weights/best.pt', map_location='cuda' if torch.cuda.is_available() else 'cpu')
+        weights = weights if weights != '' else 'DistanceEstimator/weights/best.pt'
+        self.checkPath(weights)
+        self.model = attempt_load(weights, map_location='cuda' if torch.cuda.is_available() else 'cpu')
         self.model.eval()
         self.img_size = img_size
         self.conf_thresh = conv_thresh  # conf thresh for NMS

@@ -12,6 +12,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
 from utility.GeoData import GetGeoData
 from utility.Rendering import RenderAssociations
+from boxmot import ByteTrack
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 from DistanceEstimator import DistanceEstimator
@@ -21,10 +22,12 @@ class BuoyAssociation():
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
-        self.distanceEstimator = DistanceEstimator(conv_thresh = 0.4, iou_thresh = 0.3)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
+        self.conv_thresh = 0.4  # used for NMS and BoxMOT -> Detections below this thresh won't be considered
+        self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conv_thresh, iou_thresh = 0.3)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
-        self.imu_data = None 
-        self.RenderObj = None
+        self.imu_data = None
+        self.RenderObj = None   # render Instance
+        self.MOT = self.initBoxMOT()         # Multi Object Tracker Instance
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
         #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -149,6 +152,13 @@ class BuoyAssociation():
                 print("No IMU data found, check path: {path}")
         return result
     
+    def initBoxMOT(self):
+        return ByteTrack(
+            track_thresh=self.conv_thresh,    # threshold for detection confidence -> only BBs above this thresh are tracked
+            match_thresh=0.8,    # matching thresh -> controls max dist allowed between tracklets & detections for a match
+            track_buffer=300      # number of frames to keep a track alive after it was last detected
+        )
+
     def plot_Predictions(self, data, name, folder):
         # transfoms buoy data to ship cs and plots them
 
@@ -369,6 +379,15 @@ class BuoyAssociation():
             
             # get predictions for frame
             pred, pred_dict = self.getPredictions(frame, frame_id)
+
+            # BoxMOT tracking on predictions
+            preds_boxmot_format = pred[:,0:6]    # preds need to be in format [xyxy, conf, classID]
+            preds_boxmot_format = np.array(preds_boxmot_format)
+            res = self.MOT.update(preds_boxmot_format, frame)   # res --> M X (x, y, x, y, id, conf, cls, ind)
+            print(res)
+            print("-------------------------")
+            self.MOT.plot_results(frame, show_trajectories=True)
+
             # draw BBs on frame
             if not rendering:
                 self.distanceEstimator.drawBoundingBoxes(frame, pred)
@@ -399,7 +418,7 @@ class BuoyAssociation():
                     color = self.getColor(i)
                     color_dict_preds[m[1]] = color
                     color_dict_gt[m[0]] = color
-                    self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
+                    #self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
                 with lock:
                     self.RenderObj.setShipData(*pred_dict["ship"])
                     self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
@@ -425,5 +444,5 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 #ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

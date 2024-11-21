@@ -78,9 +78,12 @@ class DistanceEstimator():
         # Function draws bounding boxed on a live frame
         txtcolor = [255, 255, 255]
         for BB in preds:
-            x,y,w,h,conf,cls,dist,angle,id=BB[:9]
+            x,y,w,h,conf,cls,dist,angle=BB[:8]
             if conf > conf_thresh:
-                annotation = f"{id}, {conf:.2f}, {int(dist)}"
+                if len(BB) == 9:
+                    annotation = f"{int(BB[8])}, {conf:.2f}, {int(dist)}"
+                else:
+                    annotation = f"{conf:.2f}, {int(dist)}"
                 if color is None:
                     color = get_color_based_on_distance(dist)
                     if color == (0, 250, 250):

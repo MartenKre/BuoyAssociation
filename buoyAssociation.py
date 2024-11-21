@@ -7,6 +7,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 import threading
+import time
 from scipy.optimize import linear_sum_assignment
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
@@ -27,7 +28,8 @@ class BuoyAssociation():
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
         self.imu_data = None
         self.RenderObj = None   # render Instance
-        self.MOT = self.initBoxMOT()         # Multi Object Tracker Instance
+        self.track_buffer = 60              # after exceeding thresh (frames count) a lost will be reassigned new ID 
+        self.MOT = self.initBoxMOT()        # Multi Object Tracker Instance
         self.ma_storage = {}    # dict to store moving averages
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
@@ -83,7 +85,7 @@ class BuoyAssociation():
         pred = torch.cat((pred, ids), dim=-1)   # pred = [N x [xyxy,conf,classID,dist,angle,ID]]
 
         if moving_average:
-            pred = self.moving_average(pred, method='EMA')
+            pred = self.moving_average(pred, frame_id, method='EMA')
 
         pred_dict = self.BuoyLocationPred(frame_id, pred)   # compute buoy predictions
         return pred, pred_dict
@@ -102,7 +104,7 @@ class BuoyAssociation():
         preds = torch.cat((preds, alpha), dim=-1)
         return preds
     
-    def moving_average(self, preds, method='UEMA'):
+    def moving_average(self, preds, frameID, method='UEMA'):
         """Computes moving average over dist predictions specified by method
         Args:
             preds: prediction tensor with ID at last pos [N x [xyxy,conf,class,dist,angle,ID]]
@@ -114,38 +116,42 @@ class BuoyAssociation():
 
         # EMA / UEMA Parameters
         alpha = 0.9
-
-        # Window Size
+        # WMA: Window Size
         w_sz = 10
+
+        # clean up dict entries of tracks that exceed max frame threshold
+        for k in list(self.ma_storage.keys()):
+            if (frameID - self.ma_storage[k]['frameID']) > self.track_buffer:
+                del self.ma_storage[k]
 
         for pred in preds:
             id = int(pred[-1])
             if id == -1:
                 continue    # if no id has been assigned to BB, keep dist prediction
             if id in self.ma_storage:
+                self.ma_storage[id]['frameID'] = frameID
                 if method == 'EMA':
-                    self.ma_storage[id] = alpha * self.ma_storage[id] + (1-alpha) * pred[6] # compute EMA
-                    pred[6] = self.ma_storage[id]
+                    self.ma_storage[id]['G'] = alpha * self.ma_storage[id]['G'] + (1-alpha) * pred[6] # compute EMA
+                    pred[6] = self.ma_storage[id]['G']
                 elif method == 'UEMA':
                     self.ma_storage[id]['S'] = alpha * self.ma_storage[id]['S'] + pred[6] # compute EMA
                     i = self.ma_storage[id]['n']
                     pred[6] = (1-alpha) / (1 - alpha**(i+1)) * self.ma_storage[id]['S']
                     self.ma_storage[id]['n'] += 1
                 elif method == 'WMA':
-                    self.ma_storage[id].append(pred[6])
+                    self.ma_storage[id]['data'].append(pred[6])
                     if len(self.ma_storage[id]) > w_sz:
-                        self.ma_storage[id].pop(0)
-                    print(id, int(pred[6]),  "/",  int(sum(self.ma_storage[id]) / len(self.ma_storage[id])))
+                        self.ma_storage[id]['data'].pop(0)
                     pred[6] = sum(self.ma_storage[id]) / len(self.ma_storage[id])
                 else:
                     raise ValueError("Method {method} not defined")
             else:
                 if method == 'EMA':
-                    self.ma_storage[id] = pred[6]
+                    self.ma_storage[id] = {'G': pred[6], 'frameID': frameID}
                 elif method == 'UEMA':
-                    self.ma_storage[id] = {'n': 1, 'S': pred[6]}
+                    self.ma_storage[id] = {'n': 1, 'S': pred[6], 'frameID': frameID}
                 elif method == 'WMA':
-                    self.ma_storage[id] = [pred[6]]
+                    self.ma_storage[id] = {'data': [pred[6]], 'frameID': frameID}
                 else:
                     raise ValueError("Method {method} not defined")
 
@@ -219,9 +225,9 @@ class BuoyAssociation():
     
     def initBoxMOT(self):
         return ByteTrack(
-            track_thresh=self.conv_thresh,    # threshold for detection confidence -> only BBs above this thresh are tracked
-            match_thresh=0.8,    # matching thresh -> controls max dist allowed between tracklets & detections for a match
-            track_buffer=300      # number of frames to keep a track alive after it was last detected
+            track_thresh=self.conv_thresh,      # threshold for detection confidence -> seperates BBs into high and low confidence
+            match_thresh=0.98,                  # matching thresh -> controls max dist allowed between tracklets & detections for a match
+            track_buffer=self.track_buffer      # number of frames to keep a track alive after it was last detected
         )
 
     def plot_Predictions(self, data, name, folder):
@@ -320,8 +326,8 @@ class BuoyAssociation():
         path = os.path.join(folder, name+"_buoys.pdf")
         plt.savefig(path)
 
-    def getColor(self, i):
-        # returns color (Tuple RGBA normalized) from colortable based in argument i
+    def getColor(self, color_dict, frameID, id):
+        # returns colordict with new entry & color added for ID. Removes up old entries
 
         color_table = [(255/255, 255/255, 0, 1),
                        (102/255, 0, 102/255, 1),
@@ -332,7 +338,21 @@ class BuoyAssociation():
                        (224/255, 224/255, 224/255, 1),
                        (128/255, 128/255, 0, 1)
                        ]
-        return color_table[i%len(color_table)]
+
+        # clean up color_dict by removing id,color pairs that are old
+        for k in list(color_dict.keys()):
+            if (frameID - color_dict[k]['frame']) > self.track_buffer or k < 0:
+                del color_dict[k]
+ 
+        # add new id with color to dict   
+        clr = (90/255, 90/255, 90/255, 1)    # default color if all other colors are already taken    
+        for color in color_table:
+            if color not in [color_dict[k]["color"] for k in color_dict]:
+                clr = color
+                break
+        color_dict[id] = {'color': clr, 'frame':frameID}
+
+        return color_dict
 
     def create_run_directory(self, base_name="run", path=""):
         i = 0
@@ -344,6 +364,18 @@ class BuoyAssociation():
                 print(f"Created directory: {path_to_folder} to store plots")
                 return path_to_folder
             i += 1
+
+    def displayFPS(self, frame, prev_frame_time):
+        # function displays FPS on frame
+
+        font = cv2.FONT_HERSHEY_SIMPLEX 
+        new_frame_time = time.time() 
+        fps= 1/(new_frame_time-prev_frame_time) 
+        prev_frame_time = new_frame_time 
+        fps = int(fps) 
+        fps = str(fps) 
+        cv2.putText(frame, fps, (10, 20), font, 0.5, (50, 50, 50)) 
+        return new_frame_time
     
     def matching(self, preds, buoys_chart):
         """function computes bipartite matching between chart buoys and predictions
@@ -430,6 +462,8 @@ class BuoyAssociation():
         self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
 
         cap = cv2.VideoCapture(video_path)
+        current_time = time.time()
+        color_assignment = {}
 
         # Check if the video opened successfully
         if not cap.isOpened():
@@ -445,10 +479,8 @@ class BuoyAssociation():
             # get predictions for frame
             pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
 
-
             # draw BBs on frame
-            if not rendering:
-                self.distanceEstimator.drawBoundingBoxes(frame, pred)
+            self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(0,0,1))
 
             # check if buoydata needs to be reloaded
             refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
@@ -466,14 +498,20 @@ class BuoyAssociation():
                 # pass extracted buoys and predictions to matching 
                 matching_results = self.matching(pred_dict["buoy_predictions"], filteredBuoys)
 
-                # TODO display matched buoys with different color & also redraw BBs in that color
-                # redraw matched BBs with other color
-
             if rendering:
                 color_dict_preds = {}
                 color_dict_gt = {}
                 for i, m in enumerate(matching_results):
-                    color = self.getColor(i)
+                    # get ID of BB
+                    id = int(pred[m[1], 8])
+                    if id not in color_assignment or id==-1:  # if id has no color so far add it to color dict
+                        if id == -1:    # if box is not currently tracked (-1), assign unique negative id
+                            id = -1*i
+                        color_assignment = self.getColor(color_assignment, frame_id, id)
+                        color = color_assignment[id]['color']
+                    else:   # if id already has assigned color, use this color
+                        color = color_assignment[id]['color']
+                        color_assignment[id]['frame'] = frame_id
                     color_dict_preds[m[1]] = color
                     color_dict_gt[m[0]] = color
                     self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
@@ -481,6 +519,9 @@ class BuoyAssociation():
                     self.RenderObj.setShipData(*pred_dict["ship"])
                     self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
                     self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
+
+            # display FPS
+            current_time = self.displayFPS(frame, current_time)
 
             # Display the frame (optional for real-time applications)
             cv2.imshow("Buoy Association", frame)

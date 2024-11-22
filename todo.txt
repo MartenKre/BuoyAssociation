@@ -1,11 +1,16 @@
-- write script that runs model on sample image & draws bounding boxes
-- extract location of bounding boxes
-- rotate image based on roll (& maybe pitch?) of camera
-- Get angle between principal ray of ship and buoy (from pixel space)
-- With angle and dist information transform buoy from camera cs to global cs
-- perform matching
-- filter matching results e.g. based on conf and/or dist to matched gt buoy
+- write script that runs model on sample image & draws bounding boxes			✓
+- extract location of bounding boxes							✓
+- rotate image based on roll (& maybe pitch?) of camera					✓
+- Get angle between principal ray of ship and buoy (from pixel space)			✓
+- With angle and dist information transform buoy from camera cs to global cs		✓
+- perform matching 									✓
+- filter matching results e.g. based on conf and/or dist to matched gt buoy 		✓
 
 Additional tasks:
-- add object tracking
-- add robustness to model detection by creating more training data
+- add object tracking ✓
+- add robustness to model detection by creating more training data 
+- Online Computation of Camera Intrinsics by Cost Minimalization of Angle Deviation
+- Develop concept of how to deal with incorrect buoy GT data
+
+Detailed Camera Information:
+https://docs.luxonis.com/hardware/sensors/IMX378

@@ -43,6 +43,7 @@ class RenderAssociations(ShowBase):
         # load blender models (exported to .egg)
         self.buoy_model_green = self.loader.loadModel("utility/render_assets/buoy_green.egg")
         self.buoy_model_red = self.loader.loadModel("utility/render_assets/buoy_red.egg")
+        self.buoy_wireframe = self.loader.loadModel("utility/render_assets/buoy_wireframe.egg")
 
         # start basic rendering
         self.set_background_color(0.71, 0.71, 0.71, 1)  # (R, G, B, A) values (0 to 1)
@@ -167,7 +168,6 @@ class RenderAssociations(ShowBase):
     def renderBuoyGT(self):
         for i, (x, y) in enumerate(self.buoysGT):
             buoy = deepcopy(self.buoy_model_green)
-
             color = (0,1,0,1)
             if i in self.matchingColorsGT:
                 color = self.matchingColorsGT[i]
@@ -177,7 +177,7 @@ class RenderAssociations(ShowBase):
                 buoy.setMaterial(myMaterial, priority=1)
 
             buoy.setScale(8, 8, 8)
-            buoy.setPos(x, y, -2.5)
+            buoy.setPos(x, y, -1.8)
             p = 3 * np.sin(1.5*self.t)
             r = 1.5 * np.sin(1*self.t)
             buoy.setHpr(0, p, r)
@@ -194,7 +194,7 @@ class RenderAssociations(ShowBase):
     def renderBuoyPreds(self):
         # the predictions are expected to be in lat lon coords
         for i, (x, y) in enumerate(self.preds):
-            buoy = deepcopy(self.buoy_model_red)
+            buoy = deepcopy(self.buoy_wireframe)
 
             color = (1,0,0,1)
             if i in self.matchingColorsPreds:
@@ -204,11 +204,11 @@ class RenderAssociations(ShowBase):
                 myMaterial.setDiffuse(color)
                 buoy.setMaterial(myMaterial, priority=1)
 
-            buoy.setScale(8, 8, 8)
+            buoy.setScale(7, 7, 7)
             p = 3 * np.sin(1.5*self.t+1.5)
             r = 1.5 * np.sin(1*self.t+1.5)
             buoy.setHpr(0, p, r)
-            buoy.setPos(x, y, -2.5)
+            buoy.setPos(x, y, -1.8)
             buoy.reparentTo(self.render)
             self.pred_buoys_render.append(buoy)
 
@@ -241,7 +241,7 @@ class RenderAssociations(ShowBase):
 
     def shipCam(self):
         # cam that follows ship
-        pos = np.array([-400, 0, 150, 1])  # camera pos in ship cs
+        pos = np.array([-300, 0, 150, 1])  # camera pos in ship cs
         view_vec = np.array([600, 0, 0, 1])
         pos = self.W_T_Ship@pos
         view_vec = self.W_T_Ship@view_vec

@@ -18,8 +18,8 @@ from boxmot import ByteTrack
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 from DistanceEstimator import DistanceEstimator
 
-class BuoyAssociation():
-    def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
+class BuoyAssociation():    # 3.75
+    def __init__(self, focal_length=3.75, pixel_size=0.00155, img_sz=[1920, 1080]):
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
@@ -585,7 +585,7 @@ ba = BuoyAssociation()
 # test_folder = "/home/marten/Uni/Semester_4/src/Trainingdata/labeled/Testdata/954_2_Pete2"
 # images_dir = os.path.join(test_folder, 'images') 
 # imu_dir = os.path.join(test_folder, 'imu') 
-#ba.test(images_dir, imu_dir)
+# ba.test(images_dir, imu_dir)
 
 ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

@@ -28,7 +28,18 @@ class GetGeoData():
             if abs(buoy_lng - pos_lng) < self.tile_size and abs(buoy_lat - pos_lat) < self.tile_size:
                 buoys.append(buoy)
         return buoys
-    
+
+    def getBuoyLocationsThreading(self, pos_lat, pos_lng, results_list, event):
+        # Function to get BuoyLocations in a thread -> saves locations in a results_list and sets event flag
+        # Arguments: pos_lat & pos_lng are geographical coordinates
+        self.tile_center = {"lat": pos_lat, "lng": pos_lng}
+        for buoy in self.data["features"]:
+            buoy_lat = buoy["geometry"]["coordinates"][1]
+            buoy_lng = buoy["geometry"]["coordinates"][0]
+            if abs(buoy_lng - pos_lng) < self.tile_size and abs(buoy_lat - pos_lat) < self.tile_size:
+                results_list.append(buoy)
+        event.set() 
+
     def checkForRefresh(self, lat, lng):
         # function checks whether lat & lng are too close to tile edge
         # returns true if this is the case, else false

@@ -429,6 +429,33 @@ class BuoyAssociation():
 
         return list(set(selected_buoys))
 
+    def filterPreds(self, shipPose, preds, buoysGT, dist_thresh_far = 0.15, dist_thresh_close = 0.35):
+        """ function filters predictions based on nearest neighbour search & thresholding
+        thrshold is based on relative distance from pred to ship and distinguished between far (>150m) and close (<=150m)
+        Args:
+            shipPose:       [lat,lng,heading]
+            preds:          list of buoy preds in lat lng format [lat,lng],...]
+            buoysGT:        list of ground truth buoys in lat lng format [[lat,lng],...]
+            dist_thresh:    threshold (relative w.r.t. closest dist to gt buoys / dist to ship)
+        Returns:
+            filtered_preds: filtered list of buoy predictions in lat lng format [[lat,lng],...]
+            index_dict: matches original indices of prediction vector to new indices of filtered preds 
+        """
+
+        filtered_preds = []
+        index_dict = {}
+        for i, pred in enumerate(preds):
+            distances = list(map(lambda x: haversineDist(*pred, *x), buoysGT))
+            closestGT = np.argmin(distances)
+            closest_dist = min(distances) # closest dist to gt buoys
+            dist_to_ship = haversineDist(*pred, *shipPose[:2])
+            dist_gt_ship = haversineDist(*buoysGT[closestGT], *shipPose[:2])
+            dist_thresh = dist_thresh_far if dist_gt_ship > 150 else dist_thresh_close
+            if closest_dist / dist_to_ship <= dist_thresh:
+                filtered_preds.append(pred)
+                index_dict[len(filtered_preds)-1] = i
+        return filtered_preds, index_dict
+
     def video(self, video_path, imu_path, rendering=False):
         # run buoy association on video
 
@@ -459,7 +486,9 @@ class BuoyAssociation():
         lat_start = self.imu_data[0][3]
         lng_start = self.imu_data[0][4]
         buoyCoords = self.BuoyCoordinates.getBuoyLocations(lat_start, lng_start)
-        self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
+        newBuoyCoords = threading.Event()   # event that new data has arrived from thread
+        results_list = []
+        #self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
 
         cap = cv2.VideoCapture(video_path)
         current_time = time.time()
@@ -471,66 +500,81 @@ class BuoyAssociation():
             exit()
 
         frame_id = 0
+        paused = False
         while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break  # End of video
-            
-            # get predictions for frame
-            pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
+            if not paused:
+                ret, frame = cap.read()
+                if not ret:
+                    break  # End of video
+                
+                # get predictions for frame
+                pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
 
-            # draw BBs on frame
-            self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(0,0,1))
+                # draw BBs on frame
+                self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0))
 
-            # check if buoydata needs to be reloaded
-            refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
-            if refresh:
-                # load new buoycoords in seperate thread 
-                print("refreshing buoy coords")
-                buoyCoords = threading.Thread(target=self.BuoyCoordinates.getBuoyLocations, 
-                                              args=(pred_dict["ship"][0], pred_dict["ship"][1],), daemon=True)
-                buoyCoords.start()
-            
-            # extract relevant buoys for the current frame from the buoyCoords file
-            filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
-            matching_results = []
-            if len(filteredBuoys) > 0 and len(pred_dict["buoy_predictions"]) > 0:
-                # pass extracted buoys and predictions to matching 
-                matching_results = self.matching(pred_dict["buoy_predictions"], filteredBuoys)
+                # check if new buoy coords have been set by thread
+                if newBuoyCoords.is_set():
+                    newBuoyCoords.clear()   # clear event flag
+                    buoyCoords = results_list   # copy results list
+                    results_list = []   # clear results list
+                
+                # check if buoydata needs to be reloaded
+                refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
+                if refresh:
+                    # load new buoycoords in seperate thread 
+                    print("refreshing buoy coords")
+                    t = threading.Thread(target=self.BuoyCoordinates.getBuoyLocationsThreading, 
+                                                args=(pred_dict["ship"][0], pred_dict["ship"][1],results_list, newBuoyCoords), daemon=True)
+                    t.start()
+                
+                # extract relevant gt buoys for the current frame from the buoyCoords file
+                filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
+                # filter buoy predictions (NNS & relative Thresholding)
+                filteredPreds, idx_dict = self.filterPreds(pred_dict['ship'], pred_dict['buoy_predictions'], filteredBuoys)
+                matching_results = []
+                if len(filteredBuoys) > 0 and len(filteredPreds) > 0:
+                    # pass extracted buoys and predictions to matching 
+                    matching_results = self.matching(filteredPreds, filteredBuoys)
 
-            if rendering:
-                color_dict_preds = {}
-                color_dict_gt = {}
-                for i, m in enumerate(matching_results):
-                    # get ID of BB
-                    id = int(pred[m[1], 8])
-                    if id not in color_assignment or id==-1:  # if id has no color so far add it to color dict
-                        if id == -1:    # if box is not currently tracked (-1), assign unique negative id
-                            id = -1*i
-                        color_assignment = self.getColor(color_assignment, frame_id, id)
-                        color = color_assignment[id]['color']
-                    else:   # if id already has assigned color, use this color
-                        color = color_assignment[id]['color']
-                        color_assignment[id]['frame'] = frame_id
-                    color_dict_preds[m[1]] = color
-                    color_dict_gt[m[0]] = color
-                    self.distanceEstimator.drawBoundingBoxes(frame, pred[m[1]].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
-                with lock:
-                    self.RenderObj.setShipData(*pred_dict["ship"])
-                    self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
-                    self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
+                if rendering:
+                    color_dict_preds = {}
+                    color_dict_gt = {}
+                    for i, m in enumerate(matching_results):
+                        # get ID of BB
+                        idx_pred = idx_dict[m[1]]   # remap matching index to pred index
+                        id = int(pred[idx_pred, 8])
+                        if id not in color_assignment or id==-1:  # if id has no color so far add it to color dict
+                            if id == -1:    # if box is not currently tracked (-1), assign unique negative id
+                                id = -1*i
+                            color_assignment = self.getColor(color_assignment, frame_id, id)
+                            color = color_assignment[id]['color']
+                        else:   # if id already has assigned color, use this color
+                            color = color_assignment[id]['color']
+                            color_assignment[id]['frame'] = frame_id
+                        color_dict_preds[idx_pred] = color
+                        color_dict_gt[m[0]] = color
+                        self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
+                    with lock:
+                        self.RenderObj.setShipData(*pred_dict["ship"])
+                        self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
+                        self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
 
-            # display FPS
-            current_time = self.displayFPS(frame, current_time)
+                # display FPS
+                current_time = self.displayFPS(frame, current_time)
 
-            # Display the frame (optional for real-time applications)
-            cv2.imshow("Buoy Association", frame)
+                # Display the frame (optional for real-time applications)
+                cv2.imshow("Buoy Association", frame)
+                frame_id += 1
 
+            key = cv2.waitKey(1)
             # Press 'q' to exit the loop
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if key == ord('q'):
                 break
 
-            frame_id += 1
+            if key == 32:
+                cv2.waitKey(-1)
+
 
         # Release resources
         cap.release()

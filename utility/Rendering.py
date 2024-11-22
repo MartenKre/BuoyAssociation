@@ -240,7 +240,7 @@ class RenderAssociations(ShowBase):
 
     def shipCam(self):
         # cam that follows ship
-        pos = np.array([-400, 0, 150, 1])  # camera pos in ship cs
+        pos = np.array([-500, 0, 200, 1])  # camera pos in ship cs
         view_vec = np.array([600, 0, 0, 1])
         pos = self.W_T_Ship@pos
         view_vec = self.W_T_Ship@view_vec

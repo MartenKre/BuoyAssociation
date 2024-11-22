@@ -429,7 +429,7 @@ class BuoyAssociation():
 
         return list(set(selected_buoys))
 
-    def filterPreds(self, shipPose, preds, buoysGT, dist_thresh_far = 0.15, dist_thresh_close = 0.35):
+    def filterPreds(self, shipPose, preds, buoysGT, dist_thresh_far = 0.2, dist_thresh_close = 0.35):
         """ function filters predictions based on nearest neighbour search & thresholding
         thrshold is based on relative distance from pred to ship and distinguished between far (>150m) and close (<=150m)
         Args:
@@ -575,10 +575,10 @@ class BuoyAssociation():
             if key == 32:
                 cv2.waitKey(-1)
 
-
         # Release resources
         cap.release()
         cv2.destroyAllWindows()
+
 
 ba = BuoyAssociation()
 

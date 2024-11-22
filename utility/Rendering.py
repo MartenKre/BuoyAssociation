@@ -16,6 +16,7 @@ class RenderAssociations(ShowBase):
         self.render.setAntialias(AntialiasAttrib.MMultisample)  # Enable anti-aliasing
         lens = base.cam.node().getLens()
         lens.setFar(3000)
+        lens.setFov(55,40)
         #filter = CommonFilters(self.win, self.cam)
         #filter.setBloom()
 
@@ -240,7 +241,7 @@ class RenderAssociations(ShowBase):
 
     def shipCam(self):
         # cam that follows ship
-        pos = np.array([-500, 0, 200, 1])  # camera pos in ship cs
+        pos = np.array([-400, 0, 150, 1])  # camera pos in ship cs
         view_vec = np.array([600, 0, 0, 1])
         pos = self.W_T_Ship@pos
         view_vec = self.W_T_Ship@view_vec

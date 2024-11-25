@@ -5,32 +5,39 @@ import numpy as np
 import torch
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import matplotlib.pyplot as plt
 import threading
 import time
+from collections import defaultdict
 from scipy.optimize import linear_sum_assignment
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
-from utility.GeoData import GetGeoData
-from utility.Rendering import RenderAssociations
-from boxmot import ByteTrack
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 from DistanceEstimator import DistanceEstimator
+
+from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
+from utility.GeoData import GetGeoData
+from utility.Rendering import RenderAssociations
+from utility.LivePlotting import LivePlots
+from boxmot import ByteTrack
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
 
 class BuoyAssociation():    # 3.75
     def __init__(self, focal_length=3.75, pixel_size=0.00155, img_sz=[1920, 1080]):
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
-        self.conv_thresh = 0.4  # used for NMS and BoxMOT -> Detections below this thresh won't be considered
-        self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conv_thresh, iou_thresh = 0.3)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
+        self.conv_thresh = 0.25  # used for NMS and BoxMOT -> Detections below this thresh won't be considered
+        self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conv_thresh, iou_thresh = 0.2)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
         self.imu_data = None
         self.RenderObj = None   # render Instance
         self.track_buffer = 60              # after exceeding thresh (frames count) a lost will be reassigned new ID 
         self.MOT = self.initBoxMOT()        # Multi Object Tracker Instance
         self.ma_storage = {}    # dict to store moving averages
+        self.matching_confidence = {}
+        self.matching_confidence_plotting = {}
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
         #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -225,8 +232,8 @@ class BuoyAssociation():    # 3.75
     
     def initBoxMOT(self):
         return ByteTrack(
-            track_thresh=self.conv_thresh,      # threshold for detection confidence -> seperates BBs into high and low confidence
-            match_thresh=0.98,                  # matching thresh -> controls max dist allowed between tracklets & detections for a match
+            track_thresh=2 * self.conv_thresh,      # threshold for detection confidence -> seperates BBs into high and low confidence
+            match_thresh=0.99,                  # matching thresh -> controls max dist allowed between tracklets & detections for a match
             track_buffer=self.track_buffer      # number of frames to keep a track alive after it was last detected
         )
 
@@ -327,7 +334,7 @@ class BuoyAssociation():    # 3.75
         plt.savefig(path)
 
     def getColor(self, color_dict, frameID, id):
-        # returns colordict with new entry & color added for ID. Removes up old entries
+        # returns colordict with new entry & color added for ID. Removes old entries
 
         color_table = [(255/255, 255/255, 0, 1),
                        (102/255, 0, 102/255, 1),
@@ -341,7 +348,7 @@ class BuoyAssociation():    # 3.75
 
         # clean up color_dict by removing id,color pairs that are old
         for k in list(color_dict.keys()):
-            if (frameID - color_dict[k]['frame']) > self.track_buffer or k < 0:
+            if (frameID - color_dict[k]['frame']) > self.track_buffer or k<0:
                 del color_dict[k]
  
         # add new id with color to dict   
@@ -377,6 +384,33 @@ class BuoyAssociation():    # 3.75
         cv2.putText(frame, fps, (10, 20), font, 0.5, (50, 50, 50)) 
         return new_frame_time
     
+    def Coords2Hash(self, coords):
+        # takes a tuple of lat, lng coordinates and returns a unique hash key as string
+        return str(coords[0])+str(coords[1])
+    
+    def computeMatchingConf(self, id, buoyGT, color): 
+        # for each gt buoy compute confidence of all predictions ids in the past
+
+        conf_multiplier = 1 / 15
+        max_conf = 10
+        k = self.Coords2Hash(buoyGT)
+        if k not in self.matching_confidence:
+            self.matching_confidence[k] = defaultdict(float)
+
+        self.matching_confidence[k][id] += conf_multiplier  # increase multiplier of a with 
+        self.matching_confidence[k][id] = min(max_conf, self.matching_confidence[k][id])
+
+    def decayMatchingConf(self):
+        # function decays matching conf of all entries in self.matching_confidence
+
+        conf_decay = 1 / (2*15) 
+        for k in self.matching_confidence:
+            for id in self.matching_confidence[k]:
+                self.matching_confidence[k][id] -= conf_decay
+                if self.matching_confidence[k][id] < 0:
+                    self.matching_confidence[k][id] = 0
+    
+
     def matching(self, preds, buoys_chart):
         """function computes bipartite matching between chart buoys and predictions
         Args:
@@ -448,8 +482,8 @@ class BuoyAssociation():    # 3.75
             distances = list(map(lambda x: haversineDist(*pred, *x), buoysGT))
             closestGT = np.argmin(distances)
             closest_dist = min(distances) # closest dist to gt buoys
-            dist_to_ship = haversineDist(*pred, *shipPose[:2])
-            dist_gt_ship = haversineDist(*buoysGT[closestGT], *shipPose[:2])
+            dist_to_ship = haversineDist(*pred, *shipPose[:2])  # dist between prediciton and ship
+            dist_gt_ship = haversineDist(*buoysGT[closestGT], *shipPose[:2])    # dist between gt buoy pos and ship
             dist_thresh = dist_thresh_far if dist_gt_ship > 150 else dist_thresh_close
             if closest_dist / dist_to_ship <= dist_thresh:
                 filtered_preds.append(pred)
@@ -475,8 +509,46 @@ class BuoyAssociation():    # 3.75
             processing_thread.start()
             # start rendering
             self.RenderObj.run()
+
+    def initMatchingConfPlots(self):
+        plt.ion()
+        fig = plt.figure()
+        return fig
+
+    def updatePlots(self, fig, color_dict):
+        for ax in fig.axes:
+            ax.remove()
+
+        data = self.matching_confidence_plotting
+
+        size = len([k for k in data])
+        if size == 0:
+            return 
+        gs = matplotlib.gridspec.GridSpec(1,size)
+
+        for i,k in enumerate(data):
+            ax = fig.add_subplot(gs[0, i])
+            for id in data[k]:
+                ax.plot(data[k][id]['data'], color=data[k][id]['color'])
+            ax.set_title("BuoyGT")
+            ax.set_xlabel("Frame")
+            ax.set_ylabel("Metric")
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+    def prepareData(self, color_dict):
+        for k in self.matching_confidence:
+            if k not in self.matching_confidence_plotting:
+                self.matching_confidence_plotting[k] = {}
+
+            for id in self.matching_confidence[k]:
+                if id in self.matching_confidence_plotting[k]:
+                    self.matching_confidence_plotting[k][id]['data'].append(self.matching_confidence[k][id])
+                else:
+                    color = (0.2, 0.2, 0.2, 1) if id < 0 else color_dict[id]
+                    self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color}
             
-    def processVideo(self, video_path, imu_path, rendering, lock):     
+    def processVideo(self, video_path, imu_path, rendering, lock=None):     
         # function computes predictions, and performs matching for each frame of video
 
         # load IMU data
@@ -489,6 +561,11 @@ class BuoyAssociation():    # 3.75
         newBuoyCoords = threading.Event()   # event that new data has arrived from thread
         results_list = []
         #self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
+
+        fig = self.initMatchingConfPlots()
+        # refreshPlots = threading.Event()
+        # lp = LivePlots(self, refreshPlots)
+
 
         cap = cv2.VideoCapture(video_path)
         current_time = time.time()
@@ -511,7 +588,7 @@ class BuoyAssociation():    # 3.75
                 pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
 
                 # draw BBs on frame
-                self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0))
+                self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0), conf_thresh=self.conv_thresh)
 
                 # check if new buoy coords have been set by thread
                 if newBuoyCoords.is_set():
@@ -537,31 +614,44 @@ class BuoyAssociation():    # 3.75
                     # pass extracted buoys and predictions to matching 
                     matching_results = self.matching(filteredPreds, filteredBuoys)
 
+                # compute color based on matching results
+                color_dict_preds = {}
+                color_dict_gt = {}
+                color_dict_id = {}
+                for i, m in enumerate(matching_results):
+                    # get ID of BB
+                    idx_pred = idx_dict[m[1]]   # remap matching index to pred index
+                    id = int(pred[idx_pred, 8])
+                    if id not in color_assignment or id==-1:  # if id has no color so far add it to color dict
+                        if id == -1:    # if box is not currently tracked (-1), assign unique negative id
+                            id = -1*i
+                        color_assignment = self.getColor(color_assignment, frame_id, id)
+                        color = color_assignment[id]['color']
+                    else:   # if id already has assigned color, use this color
+                        color = color_assignment[id]['color']
+                        color_assignment[id]['frame'] = frame_id
+                    color_dict_preds[idx_pred] = color
+                    color_dict_gt[m[0]] = color
+                    color_dict_id[id] = color
+                    self.computeMatchingConf(id, filteredBuoys[m[0]], color) # icrease conf of pred gt matched pair
+                    self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conv_thresh)   # draw bounding boxes based on matched indices
+
                 if rendering:
-                    color_dict_preds = {}
-                    color_dict_gt = {}
-                    for i, m in enumerate(matching_results):
-                        # get ID of BB
-                        idx_pred = idx_dict[m[1]]   # remap matching index to pred index
-                        id = int(pred[idx_pred, 8])
-                        if id not in color_assignment or id==-1:  # if id has no color so far add it to color dict
-                            if id == -1:    # if box is not currently tracked (-1), assign unique negative id
-                                id = -1*i
-                            color_assignment = self.getColor(color_assignment, frame_id, id)
-                            color = color_assignment[id]['color']
-                        else:   # if id already has assigned color, use this color
-                            color = color_assignment[id]['color']
-                            color_assignment[id]['frame'] = frame_id
-                        color_dict_preds[idx_pred] = color
-                        color_dict_gt[m[0]] = color
-                        self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3])   # draw bounding boxes based on matched indices
-                    with lock:
+                    with lock:  # send data to rendering obj
                         self.RenderObj.setShipData(*pred_dict["ship"])
                         self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
                         self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
 
+                self.decayMatchingConf()    # decay conf for all matched pairs
+
                 # display FPS
                 current_time = self.displayFPS(frame, current_time)
+
+                self.prepareData(color_dict_id)
+                if frame_id % 15 == 0:
+                    self.updatePlots(fig, color_dict_id)
+                    # lpThread = threading.Thread(target=lp.updatePlots, args=(), daemon=False)
+                    # lpThread.start()
 
                 # Display the frame (optional for real-time applications)
                 cv2.imshow("Buoy Association", frame)
@@ -587,5 +677,6 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
+#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

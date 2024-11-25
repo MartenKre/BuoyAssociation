@@ -7,6 +7,9 @@ from utility.Transformations import T_W_Ship, LatLng2ECEF, T_ECEF_Ship, extract_
 from copy import deepcopy
 from direct.filter.CommonFilters import CommonFilters
 
+# Set default window size
+loadPrcFileData("", "win-size 960 540")
+
 class RenderAssociations(ShowBase):
     def __init__(self, lock):
         super().__init__()
@@ -42,7 +45,7 @@ class RenderAssociations(ShowBase):
 
         # load blender models (exported to .egg)
         self.buoy_model_green = self.loader.loadModel("utility/render_assets/buoy_green.egg")
-        self.buoy_model_red = self.loader.loadModel("utility/render_assets/buoy_red.egg")
+        #self.buoy_model_red = self.loader.loadModel("utility/render_assets/buoy_red.egg")
         self.buoy_wireframe = self.loader.loadModel("utility/render_assets/buoy_wireframe.egg")
 
         # start basic rendering
@@ -241,7 +244,7 @@ class RenderAssociations(ShowBase):
 
     def shipCam(self):
         # cam that follows ship
-        pos = np.array([-300, 0, 150, 1])  # camera pos in ship cs
+        pos = np.array([-400, 0, 180, 1])  # camera pos in ship cs
         view_vec = np.array([600, 0, 0, 1])
         pos = self.W_T_Ship@pos
         view_vec = self.W_T_Ship@view_vec

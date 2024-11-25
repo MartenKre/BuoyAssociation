@@ -17,7 +17,8 @@ class DistanceEstimator():
                  conv_thresh=0.4, iou_thresh=0.5):
         weights = weights if weights != '' else 'DistanceEstimator/weights/best.pt'
         self.checkPath(weights)
-        self.model = attempt_load(weights, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model = attempt_load(weights, map_location=self.device)
         self.model.eval()
         self.img_size = img_size
         self.conf_thresh = conv_thresh  # conf thresh for NMS
@@ -32,7 +33,7 @@ class DistanceEstimator():
         img_resized, ratio, pad = letterbox(img, new_shape=(self.img_size, self.img_size), auto=False, scaleup=False, stride=32) # Resize with padding
         img_resized = img_resized[:,:,::-1].transpose(2, 0, 1).copy()  # BGR to RGB, shape to [3, height, width]
         img_resized = torch.from_numpy(img_resized).float() / 255.0
-        img_resized = img_resized.unsqueeze(0).to('cuda')  # Add batch dimension
+        img_resized = img_resized.unsqueeze(0).to(self.device)  # Add batch dimension
 
         # Run inference
         with torch.no_grad():

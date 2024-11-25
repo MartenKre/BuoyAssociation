@@ -17,7 +17,6 @@ from DistanceEstimator import DistanceEstimator
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
 from utility.GeoData import GetGeoData
 from utility.Rendering import RenderAssociations
-from utility.LivePlotting import LivePlots
 from boxmot import ByteTrack
 import matplotlib
 matplotlib.use('TkAgg')
@@ -515,26 +514,44 @@ class BuoyAssociation():    # 3.75
         fig = plt.figure()
         return fig
 
-    def updatePlots(self, fig, color_dict):
-        for ax in fig.axes:
-            ax.remove()
+    def updatePlots(self, fig):
+        import pyqtgraph as pg
+        fig.clear()
 
         data = self.matching_confidence_plotting
 
         size = len([k for k in data])
         if size == 0:
             return 
-        gs = matplotlib.gridspec.GridSpec(1,size)
 
         for i,k in enumerate(data):
-            ax = fig.add_subplot(gs[0, i])
+            ax = fig.addPlot(row=0, col=i, title='')
             for id in data[k]:
-                ax.plot(data[k][id]['data'], color=data[k][id]['color'])
-            ax.set_title("BuoyGT")
-            ax.set_xlabel("Frame")
-            ax.set_ylabel("Metric")
-        fig.canvas.draw()
-        fig.canvas.flush_events()
+                y = data[k][id]['data']
+                color = tuple(x*255 for x in list(data[k][id]['color']))
+                x = np.arange(start=0, stop=len(data[k][id]['data']))
+                ax.plot(x, y, pen=pg.mkPen(color=color))
+
+        fig.show()
+        # for ax in fig.axes:
+        #     ax.remove()
+
+        # data = self.matching_confidence_plotting
+
+        # size = len([k for k in data])
+        # if size == 0:
+        #     return 
+        # gs = matplotlib.gridspec.GridSpec(1,size)
+
+        # for i,k in enumerate(data):
+        #     ax = fig.add_subplot(gs[0, i])
+        #     for id in data[k]:
+        #         ax.plot(data[k][id]['data'], color=data[k][id]['color'])
+        #     ax.set_title("BuoyGT")
+        #     ax.set_xlabel("Frame")
+        #     ax.set_ylabel("Metric")
+        # fig.canvas.draw()
+        # fig.canvas.flush_events()
 
     def prepareData(self, color_dict):
         for k in self.matching_confidence:
@@ -551,6 +568,12 @@ class BuoyAssociation():    # 3.75
     def processVideo(self, video_path, imu_path, rendering, lock=None):     
         # function computes predictions, and performs matching for each frame of video
 
+        # live plotting
+        from pyqtgraph.Qt import QtCore, QtGui
+        import pyqtgraph as pg
+        matchConfPlt = pg.GraphicsLayoutWidget()
+        title = "Matching Confidence per Buoy"
+
         # load IMU data
         self.imu_data = self.getIMUData(imu_path)
 
@@ -561,11 +584,6 @@ class BuoyAssociation():    # 3.75
         newBuoyCoords = threading.Event()   # event that new data has arrived from thread
         results_list = []
         #self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
-
-        fig = self.initMatchingConfPlots()
-        # refreshPlots = threading.Event()
-        # lp = LivePlots(self, refreshPlots)
-
 
         cap = cv2.VideoCapture(video_path)
         current_time = time.time()
@@ -648,10 +666,8 @@ class BuoyAssociation():    # 3.75
                 current_time = self.displayFPS(frame, current_time)
 
                 self.prepareData(color_dict_id)
-                if frame_id % 15 == 0:
-                    self.updatePlots(fig, color_dict_id)
-                    # lpThread = threading.Thread(target=lp.updatePlots, args=(), daemon=False)
-                    # lpThread.start()
+                if frame_id % 8 == 0:
+                    self.updatePlots(matchConfPlt)
 
                 # Display the frame (optional for real-time applications)
                 cv2.imshow("Buoy Association", frame)
@@ -668,7 +684,6 @@ class BuoyAssociation():    # 3.75
         # Release resources
         cap.release()
         cv2.destroyAllWindows()
-
 
 ba = BuoyAssociation()
 

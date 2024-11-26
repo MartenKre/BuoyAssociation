@@ -11,9 +11,10 @@ from direct.filter.CommonFilters import CommonFilters
 loadPrcFileData("", "win-size 960 540")
 
 class RenderAssociations(ShowBase):
-    def __init__(self, lock):
+    def __init__(self, lock, parent):
         super().__init__()
         self.lock = lock    # lock for threading
+        self.parent = parent
         # panda3D settigns
         self.render.setShaderAuto()
         self.render.setAntialias(AntialiasAttrib.MMultisample)  # Enable anti-aliasing

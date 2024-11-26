@@ -18,13 +18,13 @@ from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haver
 from utility.GeoData import GetGeoData
 from utility.Rendering import RenderAssociations
 from boxmot import ByteTrack
-from utility.LivePlotting import LivePlots
+#from utility.LivePlotting import LivePlots
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
-class BuoyAssociation():    # 3.75
-    def __init__(self, focal_length=3.75, pixel_size=0.00155, img_sz=[1920, 1080]):
+class BuoyAssociation():    # 2.75
+    def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
@@ -111,7 +111,7 @@ class BuoyAssociation():    # 3.75
         x = (x_center - u_0) / self.scale_factor
         alpha = -1*torch.arctan((x)/self.focal_length).unsqueeze(1)
         preds = torch.cat((preds, alpha), dim=-1)
-        return preds
+        return preds   
     
     def moving_average(self, preds, frameID, method='UEMA'):
         """Computes moving average over dist predictions specified by method
@@ -411,8 +411,105 @@ class BuoyAssociation():    # 3.75
                 self.matching_confidence[k][id] -= conf_decay
                 if self.matching_confidence[k][id] < 0:
                     self.matching_confidence[k][id] = 0
-    
 
+    def updatePlots(self, fig, current_frame):
+        # updates live plots based on matching confidence data
+
+        import pyqtgraph as pg
+
+        data = self.matching_confidence_plotting
+
+        size = len([k for k in data])
+        if size == 0 or current_frame == 0:
+            return 
+
+        for i,k in enumerate(data):
+            ax = None
+            r = i // 4
+            c = i % 4
+            if i >= len(self.axes):
+                ax = fig.addPlot(row=r, col=c, title='')
+                self.axes.append(ax)
+            else:
+                ax = self.axes[i]
+            for id in data[k]:
+                key = str(k)+'_'+str(id)
+                hist = min(500, len(data[k][id]['data']))
+                color = tuple(x*255 for x in list(data[k][id]['color']))
+
+                if data[k][id]['lastframe'] < current_frame-hist:
+                    # if last time buoy has conv > 0 is older than hist, remove line
+                    if key in self.curves:
+                        ax.removeItem(self.curves[key]) 
+                        del self.curves[key]
+                    continue
+
+                y = data[k][id]['data'][-1*hist:]
+                x = np.arange(current_frame-hist+1, current_frame+1)
+
+                if key in self.curves:
+                    self.curves[key].setData(x, y)
+                else:
+                    newCurve = ax.plot(pen=pg.mkPen(color))
+                    newCurve.setData(x,y)
+                    self.curves[key] = newCurve
+
+    def prepareData(self, color_dict, frame):
+        # prepares data for live plotting of matched confidence
+
+        for k in self.matching_confidence:
+            if k not in self.matching_confidence_plotting:
+                self.matching_confidence_plotting[k] = {}
+
+            for id in self.matching_confidence[k]:
+                if id in self.matching_confidence_plotting[k]:
+                    self.matching_confidence_plotting[k][id]['data'].append(self.matching_confidence[k][id])
+                    if self.matching_confidence[k][id] > 0:
+                        self.matching_confidence_plotting[k][id]['lastframe'] = frame
+                else:
+                    color = (0.2, 0.2, 0.2, 1) if id < 0 else color_dict[id]
+                    self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color, 'lastframe': frame}
+
+    def correctCameraBias(self, matched_pairs, ship):
+        # functions aims to correct camera errors (intrinsics, e.g. focal lenght) and heading bias due to axis misalignments between gps and camera
+
+        # first check if all criteria are met to correct Bias
+        # Criteria:
+        #   1) At least two buoys in view (set)
+        #   2) Set of buoys must consist of pos & neg bearing
+        #   3) Distance to buoys should not be greater than certain threshold
+        #   4) Dist Prediction error is smallerd than certain threshold
+        #   5) Confidence of matching must exceed certain threshold
+        dist_abs_thresh = 250
+        match_conf_thresh = 4   # 1/15 per frame -> matched time > 4 sec
+        dist_err_thresh = 0.2   # relative error distance pred to distance gt
+
+        filtered_pairs = []
+        for key in matched_pairs:
+            dist_gt = haversineDist(matched_pairs[key][1], *ship[0:2])
+            dist_pred = haversineDist(matched_pairs[key][0], *ship[0:2])
+            if (self.matching_confidence[key] >= match_conf_thresh) and (dist_gt < dist_abs_thresh) and ((abs(dist_pred - dist_gt) / dist_gt) < dist_err_thresh):
+                filtered_pairs.append(matched_pairs[key])
+
+        # check that bearing to left / right of boat heading exists
+        x,y,z = LatLng2ECEF(*ship[0:2])
+        SHIP_T_ECEF = np.linalg.pinv(T_ECEF_Ship(x,y,z,ship[2]))
+        bearings = []
+        for pred, gt in filtered_pairs:
+            x,y,z = LatLng2ECEF(*pred)
+            P_Pred_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
+            bearing_pred = np.arctan(P_Pred_Ship[1] / P_Pred_Ship[0])
+            x,y,z = LatLng2ECEF(*gt)
+            P_GT_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
+            bearing_gt = np.arctan(P_GT_Ship[1] / P_GT_Ship[0])
+            bearings.append([bearing_pred, bearing_gt])
+
+        bearings = np.asarray(bearings)
+        if np.min(bearings[:, 0]) > 0 or np.max(bearings[:,0]) < 0:
+            return  # if bearings are not to left & right of screen
+
+        # TODO compute heaading bias & focal length offset 
+            
     def matching(self, preds, buoys_chart):
         """function computes bipartite matching between chart buoys and predictions
         Args:
@@ -500,76 +597,26 @@ class BuoyAssociation():    # 3.75
         else:
             # initialize Rendering Framework with data
             lock = threading.Lock()
-            self.RenderObj = RenderAssociations(lock)
+            self.RenderObj = RenderAssociations(lock, parent=self)
             self.imu_data = self.getIMUData(imu_path)
             lat_start = self.imu_data[0][3]
             lng_start = self.imu_data[0][4]
             heading_start = self.imu_data[0][2]
             self.RenderObj.initTransformations(lat_start, lng_start, heading_start) # initialize Transformation Matrices with pos & heading of first frame
             # start thread to run video processing 
-            processing_thread = threading.Thread(target=self.processVideo, args=(video_path, imu_path, rendering,lock,), daemon=True)
+            processing_thread = threading.Thread(target=self.processVideo, args=(video_path, imu_path, rendering, True, lock), daemon=True)
             processing_thread.start()
             # start rendering
             self.RenderObj.run()
 
-    def initMatchingConfPlots(self):
-        plt.ion()
-        fig = plt.figure()
-        return fig
-
-    def updatePlots(self, fig, current_frame):
-        import pyqtgraph as pg
-
-        data = self.matching_confidence_plotting
-
-        size = len([k for k in data])
-        if size == 0 or current_frame == 0:
-            return 
-
-        for i,k in enumerate(data):
-            ax = None
-            if i >= len(self.axes):
-                ax = fig.addPlot(row=0, col=i, title='')
-                self.axes.append(ax)
-            else:
-                ax = self.axes[i]
-            for id in data[k]:
-                hist = min(500, len(data[k][id]['data']))
-                y = data[k][id]['data'][-1*hist:]
-                color = tuple(x*255 for x in list(data[k][id]['color']))
-                #start_frame = data[k][id]['firstframe']
-                x = np.arange(current_frame-hist+1, current_frame+1)
-
-                key = str(k)+'_'+str(id)
-                if key in self.curves:
-                    self.curves[key].setData(x, y)
-                else:
-                    newCurve = ax.plot(pen=pg.mkPen(color))
-                    newCurve.setData(x,y)
-                    self.curves[key] = newCurve
-
-    def prepareData(self, color_dict, frame):
-        for k in self.matching_confidence:
-            if k not in self.matching_confidence_plotting:
-                self.matching_confidence_plotting[k] = {}
-
-            for id in self.matching_confidence[k]:
-                if id in self.matching_confidence_plotting[k]:
-                    self.matching_confidence_plotting[k][id]['data'].append(self.matching_confidence[k][id])
-                else:
-                    color = (0.2, 0.2, 0.2, 1) if id < 0 else color_dict[id]
-                    self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color, 'firstframe': frame}
-            
-    def processVideo(self, video_path, imu_path, rendering, lock=None):     
+    def processVideo(self, video_path, imu_path, rendering, livePlotting = False, lock=None):     
         # function computes predictions, and performs matching for each frame of video
 
         # live plotting
         import pyqtgraph as pg
-        matchConfPlt = pg.GraphicsLayoutWidget()
-        matchConfPlt.show()
-        # refreshPlots = threading.Event()
-        # livePlotting = threading.Thread(target=LivePlots, args=(self, refreshPlots))
-        # livePlotting.start()
+        if livePlotting:
+            matchConfPlt = pg.GraphicsLayoutWidget()
+            matchConfPlt.show()
 
         # load IMU data
         self.imu_data = self.getIMUData(imu_path)
@@ -633,6 +680,7 @@ class BuoyAssociation():    # 3.75
                 color_dict_preds = {}
                 color_dict_gt = {}
                 color_dict_id = {}
+                matched_pairs = {}  # dict that contains the matched pairs (pred / buoy gt) for each id
                 for i, m in enumerate(matching_results):
                     # get ID of BB
                     idx_pred = idx_dict[m[1]]   # remap matching index to pred index
@@ -648,7 +696,8 @@ class BuoyAssociation():    # 3.75
                     color_dict_preds[idx_pred] = color
                     color_dict_gt[m[0]] = color
                     color_dict_id[id] = color
-                    self.computeMatchingConf(id, filteredBuoys[m[0]], color) # icrease conf of pred gt matched pair
+                    matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]])
+                    self.computeMatchingConf(int(pred[idx_pred, 8]), filteredBuoys[m[0]], color) # icrease conf of pred gt matched pair
                     self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conv_thresh)   # draw bounding boxes based on matched indices
 
                 if rendering:
@@ -659,13 +708,14 @@ class BuoyAssociation():    # 3.75
 
                 self.decayMatchingConf()    # decay conf for all matched pairs
 
+                # plot live data
+                self.prepareData(color_dict_id, frame_id)
+                if livePlotting:
+                    if frame_id % 15 == 0:
+                        self.updatePlots(matchConfPlt, frame_id)
+
                 # display FPS
                 current_time = self.displayFPS(frame, current_time)
-
-                self.prepareData(color_dict_id, frame_id)
-                #refreshPlots.set()
-                if frame_id % 8 == 0:
-                    self.updatePlots(matchConfPlt, frame_id)
 
                 # Display the frame (optional for real-time applications)
                 cv2.imshow("Buoy Association", frame)

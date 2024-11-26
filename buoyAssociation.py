@@ -18,6 +18,7 @@ from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haver
 from utility.GeoData import GetGeoData
 from utility.Rendering import RenderAssociations
 from boxmot import ByteTrack
+from utility.LivePlotting import LivePlots
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -37,6 +38,8 @@ class BuoyAssociation():    # 3.75
         self.ma_storage = {}    # dict to store moving averages
         self.matching_confidence = {}
         self.matching_confidence_plotting = {}
+        self.axes = []
+        self.curves = {}
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
         #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -514,46 +517,38 @@ class BuoyAssociation():    # 3.75
         fig = plt.figure()
         return fig
 
-    def updatePlots(self, fig):
+    def updatePlots(self, fig, current_frame):
         import pyqtgraph as pg
-        fig.clear()
 
         data = self.matching_confidence_plotting
 
         size = len([k for k in data])
-        if size == 0:
+        if size == 0 or current_frame == 0:
             return 
 
         for i,k in enumerate(data):
-            ax = fig.addPlot(row=0, col=i, title='')
+            ax = None
+            if i >= len(self.axes):
+                ax = fig.addPlot(row=0, col=i, title='')
+                self.axes.append(ax)
+            else:
+                ax = self.axes[i]
             for id in data[k]:
-                y = data[k][id]['data']
+                hist = min(500, len(data[k][id]['data']))
+                y = data[k][id]['data'][-1*hist:]
                 color = tuple(x*255 for x in list(data[k][id]['color']))
-                x = np.arange(start=0, stop=len(data[k][id]['data']))
-                ax.plot(x, y, pen=pg.mkPen(color=color))
+                #start_frame = data[k][id]['firstframe']
+                x = np.arange(current_frame-hist+1, current_frame+1)
 
-        fig.show()
-        # for ax in fig.axes:
-        #     ax.remove()
+                key = str(k)+'_'+str(id)
+                if key in self.curves:
+                    self.curves[key].setData(x, y)
+                else:
+                    newCurve = ax.plot(pen=pg.mkPen(color))
+                    newCurve.setData(x,y)
+                    self.curves[key] = newCurve
 
-        # data = self.matching_confidence_plotting
-
-        # size = len([k for k in data])
-        # if size == 0:
-        #     return 
-        # gs = matplotlib.gridspec.GridSpec(1,size)
-
-        # for i,k in enumerate(data):
-        #     ax = fig.add_subplot(gs[0, i])
-        #     for id in data[k]:
-        #         ax.plot(data[k][id]['data'], color=data[k][id]['color'])
-        #     ax.set_title("BuoyGT")
-        #     ax.set_xlabel("Frame")
-        #     ax.set_ylabel("Metric")
-        # fig.canvas.draw()
-        # fig.canvas.flush_events()
-
-    def prepareData(self, color_dict):
+    def prepareData(self, color_dict, frame):
         for k in self.matching_confidence:
             if k not in self.matching_confidence_plotting:
                 self.matching_confidence_plotting[k] = {}
@@ -563,16 +558,18 @@ class BuoyAssociation():    # 3.75
                     self.matching_confidence_plotting[k][id]['data'].append(self.matching_confidence[k][id])
                 else:
                     color = (0.2, 0.2, 0.2, 1) if id < 0 else color_dict[id]
-                    self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color}
+                    self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color, 'firstframe': frame}
             
     def processVideo(self, video_path, imu_path, rendering, lock=None):     
         # function computes predictions, and performs matching for each frame of video
 
         # live plotting
-        from pyqtgraph.Qt import QtCore, QtGui
         import pyqtgraph as pg
         matchConfPlt = pg.GraphicsLayoutWidget()
-        title = "Matching Confidence per Buoy"
+        matchConfPlt.show()
+        # refreshPlots = threading.Event()
+        # livePlotting = threading.Thread(target=LivePlots, args=(self, refreshPlots))
+        # livePlotting.start()
 
         # load IMU data
         self.imu_data = self.getIMUData(imu_path)
@@ -665,9 +662,10 @@ class BuoyAssociation():    # 3.75
                 # display FPS
                 current_time = self.displayFPS(frame, current_time)
 
-                self.prepareData(color_dict_id)
+                self.prepareData(color_dict_id, frame_id)
+                #refreshPlots.set()
                 if frame_id % 8 == 0:
-                    self.updatePlots(matchConfPlt)
+                    self.updatePlots(matchConfPlt, frame_id)
 
                 # Display the frame (optional for real-time applications)
                 cv2.imshow("Buoy Association", frame)

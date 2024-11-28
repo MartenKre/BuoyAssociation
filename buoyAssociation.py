@@ -8,7 +8,7 @@ import cartopy.feature as cfeature
 import threading
 import time
 from collections import defaultdict
-from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment, minimize
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
@@ -106,12 +106,18 @@ class BuoyAssociation():    # 2.75
             prediction tensor concatenated with angle: on (n,8) tensor per image [xyxy, conf, cls, dist, angle]
         """
 
-        x_center = (preds[:,0] + preds[:,2]) / 2    # convert left and right corner x coords to center coord x
-        u_0 = self.image_size[0] / 2
-        x = (x_center - u_0) / self.scale_factor
+        x = self.pixel2mm(preds)
         alpha = -1*torch.arctan((x)/self.focal_length).unsqueeze(1)
         preds = torch.cat((preds, alpha), dim=-1)
         return preds   
+    
+    def pixel2mm(self, preds):
+        # function converts pixel coordinates of bounding boxes to mm
+
+        x_center = (preds[:,0] + preds[:,2]) / 2    # convert left and right corner x coords to center coord x
+        u_0 = self.image_size[0] / 2
+        x = (x_center - u_0) / self.scale_factor
+        return x
     
     def moving_average(self, preds, frameID, method='UEMA'):
         """Computes moving average over dist predictions specified by method
@@ -470,7 +476,7 @@ class BuoyAssociation():    # 2.75
                     color = (0.2, 0.2, 0.2, 1) if id < 0 else color_dict[id]
                     self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color, 'lastframe': frame}
 
-    def correctCameraBias(self, matched_pairs, ship):
+    def correctCameraBias(self, matched_pairs, ship, preds):
         # functions aims to correct camera errors (intrinsics, e.g. focal lenght) and heading bias due to axis misalignments between gps and camera
 
         # first check if all criteria are met to correct Bias
@@ -480,35 +486,60 @@ class BuoyAssociation():    # 2.75
         #   3) Distance to buoys should not be greater than certain threshold
         #   4) Dist Prediction error is smallerd than certain threshold
         #   5) Confidence of matching must exceed certain threshold
-        dist_abs_thresh = 250
+        dist_abs_thresh = 300
         match_conf_thresh = 4   # 1/15 per frame -> matched time > 4 sec
         dist_err_thresh = 0.2   # relative error distance pred to distance gt
 
         filtered_pairs = []
         for key in matched_pairs:
-            dist_gt = haversineDist(matched_pairs[key][1], *ship[0:2])
-            dist_pred = haversineDist(matched_pairs[key][0], *ship[0:2])
-            if (self.matching_confidence[key] >= match_conf_thresh) and (dist_gt < dist_abs_thresh) and ((abs(dist_pred - dist_gt) / dist_gt) < dist_err_thresh):
+            dist_gt = haversineDist(*matched_pairs[key][1], *ship[0:2])
+            dist_pred = haversineDist(*matched_pairs[key][0], *ship[0:2])
+            k = self.Coords2Hash(matched_pairs[key][1])
+            if k not in self.matching_confidence or key not in self.matching_confidence[k]: 
+                continue    # if k (Hash Key of buoy GT) not in matching_confidence -> skip
+            if ((self.matching_confidence[k][key] >= match_conf_thresh) and (dist_gt < dist_abs_thresh) 
+                and ((abs(dist_pred - dist_gt) / dist_gt) < dist_err_thresh)):
                 filtered_pairs.append(matched_pairs[key])
 
         # check that bearing to left / right of boat heading exists
         x,y,z = LatLng2ECEF(*ship[0:2])
         SHIP_T_ECEF = np.linalg.pinv(T_ECEF_Ship(x,y,z,ship[2]))
         bearings = []
-        for pred, gt in filtered_pairs:
+        for pred, gt, idx in filtered_pairs:
             x,y,z = LatLng2ECEF(*pred)
             P_Pred_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
             bearing_pred = np.arctan(P_Pred_Ship[1] / P_Pred_Ship[0])
             x,y,z = LatLng2ECEF(*gt)
             P_GT_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
             bearing_gt = np.arctan(P_GT_Ship[1] / P_GT_Ship[0])
-            bearings.append([bearing_pred, bearing_gt])
+            # make sure both bearings have same sign, since this leads to problems with gradient descent
+            # e.g. bearing_gt = -0.1, but bearing_pred = 0.1 -> since we are only allowed to change focal length
+            # gradient descent would set focal_length to infinity, thus reducing bearing_pred to zero (optimum)
+            if np.sign(bearing_gt) == np.sign(bearing_pred):
+                bearings.append([bearing_pred, bearing_gt, idx])
+
 
         bearings = np.asarray(bearings)
-        if np.min(bearings[:, 0]) > 0 or np.max(bearings[:,0]) < 0:
-            return  # if bearings are not to left & right of screen
+        if bearings.shape[0] == 0 or np.min(bearings[:, 0]) > 0 or np.max(bearings[:,0]) < 0:
+            return  # if bearings are only left or only right of principal ray -> exit
 
-        # TODO compute heaading bias & focal length offset 
+        def errorFunction(params, x, theta, focal_length):  # error function for optimizer
+            delta_f, delta_h = params
+            error = (-1 * np.arctan(x / (focal_length + delta_f)) + delta_h - theta)**2
+            error = np.sum(error)
+            return error
+        
+        delta_f = 0 # delta focal length (initial guess)
+        delta_h = 0 # delta heading (initial guess)
+        x = self.pixel2mm(preds[bearings[:,2],:]).numpy()  # bb center_x in mm
+        theta = bearings[:,1]   # target angle (buoy gt)
+
+        result = minimize(errorFunction, (delta_f, delta_h), args=(x, theta, self.focal_length))    # gradient descent to find optimal params
+        print(result.x)
+        print(result.success)
+        print("---------------------------")
+
+
             
     def matching(self, preds, buoys_chart):
         """function computes bipartite matching between chart buoys and predictions
@@ -680,7 +711,7 @@ class BuoyAssociation():    # 2.75
                 color_dict_preds = {}
                 color_dict_gt = {}
                 color_dict_id = {}
-                matched_pairs = {}  # dict that contains the matched pairs (pred / buoy gt) for each id
+                matched_pairs = {}  # dict that contains the matched pairs (pred / buoy gt) -> lat/lng coords and pred idx
                 for i, m in enumerate(matching_results):
                     # get ID of BB
                     idx_pred = idx_dict[m[1]]   # remap matching index to pred index
@@ -696,7 +727,7 @@ class BuoyAssociation():    # 2.75
                     color_dict_preds[idx_pred] = color
                     color_dict_gt[m[0]] = color
                     color_dict_id[id] = color
-                    matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]])
+                    matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
                     self.computeMatchingConf(int(pred[idx_pred, 8]), filteredBuoys[m[0]], color) # icrease conf of pred gt matched pair
                     self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conv_thresh)   # draw bounding boxes based on matched indices
 
@@ -707,6 +738,9 @@ class BuoyAssociation():    # 2.75
                         self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
 
                 self.decayMatchingConf()    # decay conf for all matched pairs
+
+                # compute heading bias & focal length delta
+                self.correctCameraBias(matched_pairs, pred_dict['ship'], pred)
 
                 # plot live data
                 self.prepareData(color_dict_id, frame_id)

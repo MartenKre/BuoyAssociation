@@ -810,6 +810,6 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

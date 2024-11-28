@@ -40,6 +40,8 @@ class BuoyAssociation():    # 2.75
         self.matching_confidence_plotting = {}
         self.axes = []
         self.curves = {}
+        self.fl_bias = [0]  # focal length bias
+        self.use_biases = True
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
         #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -107,7 +109,10 @@ class BuoyAssociation():    # 2.75
         """
 
         x = self.pixel2mm(preds)
-        alpha = -1*torch.arctan((x)/self.focal_length).unsqueeze(1)
+        if self.use_biases: # use computed focal length bias for computation of bearing
+            alpha = -1*torch.arctan((x)/(self.focal_length+self.fl_bias[-1])).unsqueeze(1)
+        else:
+            alpha = -1*torch.arctan((x)/self.focal_length).unsqueeze(1)
         preds = torch.cat((preds, alpha), dim=-1)
         return preds   
     
@@ -524,20 +529,23 @@ class BuoyAssociation():    # 2.75
             return  # if bearings are only left or only right of principal ray -> exit
 
         def errorFunction(params, x, theta, focal_length):  # error function for optimizer
-            delta_f, delta_h = params
-            error = (-1 * np.arctan(x / (focal_length + delta_f)) + delta_h - theta)**2
+            delta_f = params
+            error = (-1 * np.arctan(x / (focal_length + delta_f)) - theta)**2
             error = np.sum(error)
             return error
         
-        delta_f = 0 # delta focal length (initial guess)
+        delta_f = self.fl_bias[-1] # delta focal length (initial guess, starts with zero if no optimizations were successful so far)
         delta_h = 0 # delta heading (initial guess)
         x = self.pixel2mm(preds[bearings[:,2],:]).numpy()  # bb center_x in mm
         theta = bearings[:,1]   # target angle (buoy gt)
 
-        result = minimize(errorFunction, (delta_f, delta_h), args=(x, theta, self.focal_length))    # gradient descent to find optimal params
+        result = minimize(errorFunction, (delta_f), args=(x, theta, self.focal_length))    # gradient descent to find optimal params
+        delta_f = result.x
         print(result.x)
         print(result.success)
+        print(result.message)
         print("---------------------------")
+        self.fl_bias.append(delta_f)
 
 
             
@@ -762,6 +770,10 @@ class BuoyAssociation():    # 2.75
 
             if key == 32:
                 cv2.waitKey(-1)
+
+            if key == ord('b'): # if b is pressed, computed biases for heading & FL will be used / not used
+                self.use_biases = not self.use_biases
+                print("Use Biases: ", self.use_biases)
 
         # Release resources
         cap.release()

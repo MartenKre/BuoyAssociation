@@ -41,6 +41,7 @@ class BuoyAssociation():    # 2.75
         self.axes = []
         self.curves = {}
         self.fl_bias = [0]  # focal length bias
+        self.heading_bias = [0] # heading bias
         self.use_biases = True
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
@@ -388,14 +389,22 @@ class BuoyAssociation():    # 2.75
     def displayFPS(self, frame, prev_frame_time):
         # function displays FPS on frame
 
-        font = cv2.FONT_HERSHEY_SIMPLEX 
+        font = cv2.FONT_HERSHEY_DUPLEX
         new_frame_time = time.time() 
         fps= 1/(new_frame_time-prev_frame_time) 
         prev_frame_time = new_frame_time 
         fps = int(fps) 
         fps = str(fps) 
-        cv2.putText(frame, fps, (10, 20), font, 0.5, (50, 50, 50)) 
+        cv2.putText(frame, fps, (10, 15), font, 0.5, (50, 50, 50)) 
         return new_frame_time
+    
+    def biasStatus(self, frame):
+        font = cv2.FONT_HERSHEY_DUPLEX
+        txt = "Correction:"
+        cv2.putText(frame, txt, (10, 30), font, 0.5, (50, 50, 50)) 
+        txt = "ON" if self.use_biases else "OFF"
+        color = (0, 0, 255) if not self.use_biases else (0, 200, 0)
+        cv2.putText(frame, txt, (100, 30), font, 0.5, color) 
     
     def Coords2Hash(self, coords):
         # takes a tuple of lat, lng coordinates and returns a unique hash key as string
@@ -528,9 +537,15 @@ class BuoyAssociation():    # 2.75
         if bearings.shape[0] == 0 or np.min(bearings[:, 0]) > 0 or np.max(bearings[:,0]) < 0:
             return  # if bearings are only left or only right of principal ray -> exit
 
-        def errorFunction(params, x, theta, focal_length):  # error function for optimizer
-            delta_f = params
-            error = (-1 * np.arctan(x / (focal_length + delta_f)) - theta)**2
+        def errorFunctionFL(params, x, theta, focal_length):  # error function for optimizer
+            delta_f= params
+            error = (-1 * np.arctan(x / (focal_length + delta_f)) + delta_h - theta)**2
+            error = np.sum(error)
+            return error
+        
+        def errorFunctionHeading(params, alpha, theta):
+            delta_h = params
+            error = (alpha - theta + delta_h)**2
             error = np.sum(error)
             return error
         
@@ -539,15 +554,14 @@ class BuoyAssociation():    # 2.75
         x = self.pixel2mm(preds[bearings[:,2],:]).numpy()  # bb center_x in mm
         theta = bearings[:,1]   # target angle (buoy gt)
 
-        result = minimize(errorFunction, (delta_f), args=(x, theta, self.focal_length))    # gradient descent to find optimal params
-        delta_f = result.x
-        print(result.x)
-        print(result.success)
-        print(result.message)
-        print("---------------------------")
+        result = minimize(errorFunctionFL, (delta_f), args=(x, theta, self.focal_length))    # gradient descent to find optimal params
+        delta_f = result.x[0]
         self.fl_bias.append(delta_f)
 
-
+        alpha = -1 * np.arctan(x / (self.focal_length + delta_f))
+        result = minimize(errorFunctionHeading, (delta_h), args=(alpha, theta))
+        delta_h = result[x]
+        self.heading_bias.append(delta_h)
             
     def matching(self, preds, buoys_chart):
         """function computes bipartite matching between chart buoys and predictions
@@ -758,6 +772,8 @@ class BuoyAssociation():    # 2.75
 
                 # display FPS
                 current_time = self.displayFPS(frame, current_time)
+                # display Bias status
+                self.biasStatus(frame)
 
                 # Display the frame (optional for real-time applications)
                 cv2.imshow("Buoy Association", frame)
@@ -773,7 +789,6 @@ class BuoyAssociation():    # 2.75
 
             if key == ord('b'): # if b is pressed, computed biases for heading & FL will be used / not used
                 self.use_biases = not self.use_biases
-                print("Use Biases: ", self.use_biases)
 
         # Release resources
         cap.release()

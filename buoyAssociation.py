@@ -190,7 +190,10 @@ class BuoyAssociation():    # 2.75
 
         latCam = self.imu_data[frame_id][3]
         lngCam = self.imu_data[frame_id][4]
-        heading = self.imu_data[frame_id][2]
+        if self.use_biases:
+            heading = self.imu_data[frame_id][2] - np.rad2deg(self.heading_bias[-1])
+        else:
+            heading = self.imu_data[frame_id][2]
 
         # trasformation:    latlng to ecef, ecef to enu, enu to ship
         x, y, z = LatLng2ECEF(latCam, lngCam)  # ship coords in ECEF
@@ -404,7 +407,13 @@ class BuoyAssociation():    # 2.75
         cv2.putText(frame, txt, (10, 30), font, 0.5, (50, 50, 50)) 
         txt = "ON" if self.use_biases else "OFF"
         color = (0, 0, 255) if not self.use_biases else (0, 200, 0)
-        cv2.putText(frame, txt, (100, 30), font, 0.5, color) 
+        cv2.putText(frame, txt, (100, 30), font, 0.5, color)
+        if self.use_biases:
+            txt = f"FL: {round(self.fl_bias[-1],3)} [mm]"
+            cv2.putText(frame, txt, (10, 45), font, 0.5, (50, 50, 50)) 
+            txt = f"HD: {round(np.rad2deg(self.heading_bias[-1]),3)} [deg]"
+            cv2.putText(frame, txt, (10, 60), font, 0.5, (50, 50, 50)) 
+
     
     def Coords2Hash(self, coords):
         # takes a tuple of lat, lng coordinates and returns a unique hash key as string
@@ -539,13 +548,13 @@ class BuoyAssociation():    # 2.75
 
         def errorFunctionFL(params, x, theta, focal_length):  # error function for optimizer
             delta_f= params
-            error = (-1 * np.arctan(x / (focal_length + delta_f)) + delta_h - theta)**2
+            error = (-1 * np.arctan(x / (focal_length + delta_f)) - theta)**2
             error = np.sum(error)
             return error
         
         def errorFunctionHeading(params, alpha, theta):
             delta_h = params
-            error = (alpha - theta + delta_h)**2
+            error = (theta - alpha - delta_h)**2
             error = np.sum(error)
             return error
         
@@ -560,7 +569,7 @@ class BuoyAssociation():    # 2.75
 
         alpha = -1 * np.arctan(x / (self.focal_length + delta_f))
         result = minimize(errorFunctionHeading, (delta_h), args=(alpha, theta))
-        delta_h = result[x]
+        delta_h = result.x[0]
         self.heading_bias.append(delta_h)
             
     def matching(self, preds, buoys_chart):

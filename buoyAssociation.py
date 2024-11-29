@@ -28,12 +28,12 @@ class BuoyAssociation():    # 2.75
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
-        self.conv_thresh = 0.25  # used for NMS and BoxMOT -> Detections below this thresh won't be considered
+        self.conv_thresh = 0.25  # used for NMS and BoxMOT (x2) -> Detections below this thresh won't be considered
         self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conv_thresh, iou_thresh = 0.2)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
         self.imu_data = None
         self.RenderObj = None   # render Instance
-        self.track_buffer = 60              # after exceeding thresh (frames count) a lost will be reassigned new ID 
+        self.track_buffer = 60   # after exceeding thresh (frames count) a lost will be reassigned new ID 
         self.MOT = self.initBoxMOT()        # Multi Object Tracker Instance
         self.ma_storage = {}    # dict to store moving averages
         self.matching_confidence = {}
@@ -43,6 +43,12 @@ class BuoyAssociation():    # 2.75
         self.fl_bias = [0]  # focal length bias
         self.heading_bias = [0] # heading bias
         self.use_biases = True
+
+        # Hyperparameters Filtering Pre/ Port Matching
+        self.dist_thresh_far = 0.2
+        self.dist_thresh_close = 0.35
+        self.isclose = 150
+
 
     def test(self, images_dir, labels_dir, imu_dir, plots=True):
         #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
@@ -500,14 +506,19 @@ class BuoyAssociation():    # 2.75
                     self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color, 'lastframe': frame}
 
     def correctCameraBias(self, matched_pairs, ship, preds):
-        # functions aims to correct camera errors (intrinsics, e.g. focal lenght) and heading bias due to axis misalignments between gps and camera
+        """Computes heading and Focal Length bias based on bearing of pred & GT buoy pairs
+        Args:
+            matched_pairs: List containing [buoyPred(Lat,Lng), buoyGT(Lat,Lng), idx_pred_tensor]
+            ship: lat, lng heading
+            preds: prediction tensor
+        """
 
         # first check if all criteria are met to correct Bias
         # Criteria:
         #   1) At least two buoys in view (set)
         #   2) Set of buoys must consist of pos & neg bearing
         #   3) Distance to buoys should not be greater than certain threshold
-        #   4) Dist Prediction error is smallerd than certain threshold
+        #   4) Dist Prediction error is smaller than certain threshold
         #   5) Confidence of matching must exceed certain threshold
         dist_abs_thresh = 300
         match_conf_thresh = 4   # 1/15 per frame -> matched time > 4 sec
@@ -563,14 +574,20 @@ class BuoyAssociation():    # 2.75
         x = self.pixel2mm(preds[bearings[:,2],:]).numpy()  # bb center_x in mm
         theta = bearings[:,1]   # target angle (buoy gt)
 
-        result = minimize(errorFunctionFL, (delta_f), args=(x, theta, self.focal_length))    # gradient descent to find optimal params
+        result = minimize(errorFunctionFL, (delta_f), args=(x, theta, self.focal_length))    # gradient descent
         delta_f = result.x[0]
-        self.fl_bias.append(delta_f)
+        if len(self.fl_bias) == 1 and self.fl_bias[0] == 0:
+            self.fl_bias[0] = delta_f   # if first bias value -> overwrite default
+        else:
+            self.fl_bias.append(delta_f)    # else append
 
         alpha = -1 * np.arctan(x / (self.focal_length + delta_f))
-        result = minimize(errorFunctionHeading, (delta_h), args=(alpha, theta))
+        result = minimize(errorFunctionHeading, (delta_h), args=(alpha, theta)) # gradient descent
         delta_h = result.x[0]
-        self.heading_bias.append(delta_h)
+        if len(self.heading_bias) == 1 and self.heading_bias[0] == 0:
+            self.heading_bias[0] = delta_h   # if first bias value -> overwrite default
+        else:
+            self.heading_bias.append(delta_h)    # else append
             
     def matching(self, preds, buoys_chart):
         """function computes bipartite matching between chart buoys and predictions
@@ -624,14 +641,13 @@ class BuoyAssociation():    # 2.75
 
         return list(set(selected_buoys))
 
-    def filterPreds(self, shipPose, preds, buoysGT, dist_thresh_far = 0.2, dist_thresh_close = 0.35):
+    def filterPreds(self, shipPose, preds, buoysGT):
         """ function filters predictions based on nearest neighbour search & thresholding
         thrshold is based on relative distance from pred to ship and distinguished between far (>150m) and close (<=150m)
         Args:
             shipPose:       [lat,lng,heading]
             preds:          list of buoy preds in lat lng format [lat,lng],...]
             buoysGT:        list of ground truth buoys in lat lng format [[lat,lng],...]
-            dist_thresh:    threshold (relative w.r.t. closest dist to gt buoys / dist to ship)
         Returns:
             filtered_preds: filtered list of buoy predictions in lat lng format [[lat,lng],...]
             index_dict: matches original indices of prediction vector to new indices of filtered preds 
@@ -645,11 +661,28 @@ class BuoyAssociation():    # 2.75
             closest_dist = min(distances) # closest dist to gt buoys
             dist_to_ship = haversineDist(*pred, *shipPose[:2])  # dist between prediciton and ship
             dist_gt_ship = haversineDist(*buoysGT[closestGT], *shipPose[:2])    # dist between gt buoy pos and ship
-            dist_thresh = dist_thresh_far if dist_gt_ship > 150 else dist_thresh_close
+            dist_thresh = self.dist_thresh_far if dist_gt_ship > self.isclose else self.dist_thresh_close
             if closest_dist / dist_to_ship <= dist_thresh:
                 filtered_preds.append(pred)
                 index_dict[len(filtered_preds)-1] = i
         return filtered_preds, index_dict
+    
+    def postprocessMatching(self, matchingResults, filteredBuoys, filteredPreds, ship):
+        # filters matching results based on distance between matched pred & gt pair
+        # if dist exceeds dist thresh (absolute value) then not valid matching
+
+        matchings_filtered = []
+        for idx_gt, idx_pred in matchingResults:
+            buoyGT = filteredBuoys[idx_gt]
+            buoyPred = filteredPreds[idx_pred]
+
+            dist_buoys = haversineDist(*buoyGT, *buoyPred)
+            dist_gt_ship = haversineDist(*buoyGT, *ship[0:2])
+            dist_thresh = self.dist_thresh_far if dist_gt_ship > self.isclose else self.dist_thresh_close
+            if dist_buoys / dist_gt_ship <= dist_thresh:
+                matchings_filtered.append((idx_gt, idx_pred))
+
+        return matchings_filtered
 
     def video(self, video_path, imu_path, rendering=False):
         # run buoy association on video
@@ -737,7 +770,9 @@ class BuoyAssociation():    # 2.75
                 if len(filteredBuoys) > 0 and len(filteredPreds) > 0:
                     # pass extracted buoys and predictions to matching 
                     matching_results = self.matching(filteredPreds, filteredBuoys)
-
+                    # different buoy far away -> remove this bb from the matching results
+                    matching_results = self.postprocessMatching(matching_results, filteredBuoys, filteredPreds, pred_dict['ship'])
+                
                 # compute color based on matching results
                 color_dict_preds = {}
                 color_dict_gt = {}
@@ -810,6 +845,6 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/950_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_950.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
-#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)
+#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/17_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_17.txt", rendering=True)

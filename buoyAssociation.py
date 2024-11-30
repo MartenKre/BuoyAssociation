@@ -117,7 +117,8 @@ class BuoyAssociation():    # 2.75
 
         x = self.pixel2mm(preds)
         if self.use_biases: # use computed focal length bias for computation of bearing
-            alpha = -1*torch.arctan((x)/(self.focal_length+self.fl_bias[-1])).unsqueeze(1)
+            fl_bias = self.computeEma(self.fl_bias)
+            alpha = -1*torch.arctan((x)/(self.focal_length+fl_bias)).unsqueeze(1)
         else:
             alpha = -1*torch.arctan((x)/self.focal_length).unsqueeze(1)
         preds = torch.cat((preds, alpha), dim=-1)
@@ -184,6 +185,14 @@ class BuoyAssociation():    # 2.75
 
         return preds
 
+    def computeEma(self, sequence, alpha = 0.9):
+        # function computes ema of a sequence of values
+
+        i = len(sequence)
+        result = alpha**i * sequence[0]
+        for j in range(0,i):
+            result += sequence[i-1-j] * (1-alpha) * alpha ** j
+        return result 
     
     def BuoyLocationPred(self, frame_id, preds):
         """for each BB prediction function computes the Buoy Location based on Dist & Angle of the tensor
@@ -197,7 +206,8 @@ class BuoyAssociation():    # 2.75
         latCam = self.imu_data[frame_id][3]
         lngCam = self.imu_data[frame_id][4]
         if self.use_biases:
-            heading = self.imu_data[frame_id][2] - np.rad2deg(self.heading_bias[-1])
+            heading_bias = self.computeEma(self.heading_bias)
+            heading = self.imu_data[frame_id][2] - np.rad2deg(heading_bias)
         else:
             heading = self.imu_data[frame_id][2]
 
@@ -415,9 +425,11 @@ class BuoyAssociation():    # 2.75
         color = (0, 0, 255) if not self.use_biases else (0, 200, 0)
         cv2.putText(frame, txt, (100, 30), font, 0.5, color)
         if self.use_biases:
-            txt = f"FL: {round(self.fl_bias[-1],3)} [mm]"
+            fl_bias = self.computeEma(self.fl_bias)
+            txt = f"FL: {round(fl_bias,3)} [mm]"
             cv2.putText(frame, txt, (10, 45), font, 0.5, (50, 50, 50)) 
-            txt = f"HD: {round(np.rad2deg(self.heading_bias[-1]),3)} [deg]"
+            heading_bias = self.computeEma(self.heading_bias)
+            txt = f"HD: {round(np.rad2deg(heading_bias),3)} [deg]"
             cv2.putText(frame, txt, (10, 60), font, 0.5, (50, 50, 50)) 
 
     
@@ -512,6 +524,11 @@ class BuoyAssociation():    # 2.75
             ship: lat, lng heading
             preds: prediction tensor
         """
+        self.computeFLBias(matched_pairs, ship, preds)
+        self.computeHeadingBias(matched_pairs, ship, preds)
+
+    def computeFLBias(self, matched_pairs, ship, preds):
+        # Function computes Focal Length bias
 
         # first check if all criteria are met to correct Bias
         # Criteria:
@@ -552,7 +569,6 @@ class BuoyAssociation():    # 2.75
             if np.sign(bearing_gt) == np.sign(bearing_pred):
                 bearings.append([bearing_pred, bearing_gt, idx])
 
-
         bearings = np.asarray(bearings)
         if bearings.shape[0] == 0 or np.min(bearings[:, 0]) > 0 or np.max(bearings[:,0]) < 0:
             return  # if bearings are only left or only right of principal ray -> exit
@@ -563,14 +579,7 @@ class BuoyAssociation():    # 2.75
             error = np.sum(error)
             return error
         
-        def errorFunctionHeading(params, alpha, theta):
-            delta_h = params
-            error = (theta - alpha - delta_h)**2
-            error = np.sum(error)
-            return error
-        
         delta_f = self.fl_bias[-1] # delta focal length (initial guess, starts with zero if no optimizations were successful so far)
-        delta_h = 0 # delta heading (initial guess)
         x = self.pixel2mm(preds[bearings[:,2],:]).numpy()  # bb center_x in mm
         theta = bearings[:,1]   # target angle (buoy gt)
 
@@ -581,7 +590,59 @@ class BuoyAssociation():    # 2.75
         else:
             self.fl_bias.append(delta_f)    # else append
 
-        alpha = -1 * np.arctan(x / (self.focal_length + delta_f))
+    def computeHeadingBias(self, matched_pairs, ship, preds):
+        # function computes heading bias
+
+        # first check if all criteria are met to correct Bias
+        # Criteria:
+        #   1) At least one buoy direcly in center (only x coord) of camera view 
+        #   2) Distance to buoy should not be greater than certain threshold
+        #   3) Dist Prediction error is smaller than certain threshold
+        #   4) Confidence of matching must exceed certain threshold
+        dist_abs_thresh = 300
+        match_conf_thresh = 4   # 1/15 per frame -> matched time > 4 sec
+        dist_err_thresh = 0.2   # relative error distance pred to distance gt
+        center_thresh = 2.5     # a buoy is in center if its bearing does not exceed 5 degrees
+
+        filtered_pairs = []
+        for key in matched_pairs:   # filter matched pairs based on distance err, abs dist and confidence in matching
+            dist_gt = haversineDist(*matched_pairs[key][1], *ship[0:2])
+            dist_pred = haversineDist(*matched_pairs[key][0], *ship[0:2])
+            k = self.Coords2Hash(matched_pairs[key][1])
+            if k not in self.matching_confidence or key not in self.matching_confidence[k]: 
+                continue    # if k (Hash Key of buoy GT) not in matching_confidence -> skip
+            if ((self.matching_confidence[k][key] >= match_conf_thresh) and (dist_gt < dist_abs_thresh) 
+                and ((abs(dist_pred - dist_gt) / dist_gt) < dist_err_thresh)):
+                filtered_pairs.append(matched_pairs[key])
+
+        # only filter pairs that are directly in front of camera (i.e. bearing does not exceed center_thresh)
+        x,y,z = LatLng2ECEF(*ship[0:2])
+        SHIP_T_ECEF = np.linalg.pinv(T_ECEF_Ship(x,y,z,ship[2]))
+        bearings = []
+        for pred, gt, idx in filtered_pairs:
+            x,y,z = LatLng2ECEF(*pred)
+            P_Pred_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
+            bearing_pred = np.arctan(P_Pred_Ship[1] / P_Pred_Ship[0])
+            x,y,z = LatLng2ECEF(*gt)
+            P_GT_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
+            bearing_gt = np.arctan(P_GT_Ship[1] / P_GT_Ship[0])
+
+            if abs(np.rad2deg(bearing_pred)) <= center_thresh:
+                bearings.append([bearing_pred, bearing_gt, idx])
+
+        bearings = np.asarray(bearings)
+        if bearings.shape[0] == 0: 
+            return  # if no samples left return
+
+        def errorFunctionHeading(params, alpha, theta):
+            delta_h = params
+            error = (theta - alpha - delta_h)**2
+            error = np.sum(error)
+            return error
+
+        delta_h = self.heading_bias[-1] # delta heading (initial guess)
+        alpha = bearings[:, 0]
+        theta = bearings[:, 1]
         result = minimize(errorFunctionHeading, (delta_h), args=(alpha, theta)) # gradient descent
         delta_h = result.x[0]
         if len(self.heading_bias) == 1 and self.heading_bias[0] == 0:
@@ -845,6 +906,7 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/950_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_950.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", 
+         imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/17_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_17.txt", rendering=True)

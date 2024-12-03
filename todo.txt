@@ -7,9 +7,9 @@
 - filter matching results e.g. based on conf and/or dist to matched gt buoy 		✓
 
 Additional tasks:
-- add object tracking ✓
+- add object tracking 									✓
 - add robustness to model detection by creating more training data 
-- Online Computation of Camera Intrinsics by Cost Minimalization of Angle Deviation
+- Online Computation of Camera Intrinsics by Cost Minimalization of Angle Deviation	✓
 - Develop concept of how to deal with incorrect buoy GT data
 
 Detailed Camera Information:

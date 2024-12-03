@@ -23,7 +23,7 @@ import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
-class BuoyAssociation():    # 2.75
+class BuoyAssociation():    
     def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
@@ -186,13 +186,13 @@ class BuoyAssociation():    # 2.75
         return preds
 
     def computeEma(self, sequence, alpha = 0.9):
-        # function computes ema of a sequence of values
+        # function computes ema on a sequence of values
 
         i = len(sequence)
         result = alpha**i * sequence[0]
         for j in range(0,i):
             result += sequence[i-1-j] * (1-alpha) * alpha ** j
-        return result 
+        return result
     
     def BuoyLocationPred(self, frame_id, preds):
         """for each BB prediction function computes the Buoy Location based on Dist & Angle of the tensor
@@ -559,10 +559,10 @@ class BuoyAssociation():    # 2.75
         for pred, gt, idx in filtered_pairs:
             x,y,z = LatLng2ECEF(*pred)
             P_Pred_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
-            bearing_pred = np.arctan(P_Pred_Ship[1] / P_Pred_Ship[0])
+            bearing_pred = np.arctan2(P_Pred_Ship[1], P_Pred_Ship[0])
             x,y,z = LatLng2ECEF(*gt)
             P_GT_Ship = SHIP_T_ECEF@np.array([x,y,z,1])
-            bearing_gt = np.arctan(P_GT_Ship[1] / P_GT_Ship[0])
+            bearing_gt = np.arctan2(P_GT_Ship[1], P_GT_Ship[0])
             # make sure both bearings have same sign, since this leads to problems with gradient descent
             # e.g. bearing_gt = -0.1, but bearing_pred = 0.1 -> since we are only allowed to change focal length
             # gradient descent would set focal_length to infinity, thus reducing bearing_pred to zero (optimum)
@@ -691,7 +691,7 @@ class BuoyAssociation():    # 2.75
             lng = buoy["geometry"]["coordinates"][0]
             x,y,z = LatLng2ECEF(lat, lng)
             pos_bouy = Ship_T_ECEF @ np.array([x,y,z,1]) # transform buoys from ecef to ship cs
-            bearing = np.arctan2(pos_bouy[1],pos_bouy[0])   # compute bearing of buoy
+            bearing = np.rad2deg(np.arctan2(pos_bouy[1],pos_bouy[0]))   # compute bearing of buoy
             dist_to_ship = haversineDist(lat, lng, ship_pose[0], ship_pose[1])  # compute dist to ship
             if abs(bearing) <= fov_with_padding and dist_to_ship <= dist_thresh:
                 # include buoys that are within fov+padding and inside maxdist
@@ -906,7 +906,6 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", 
-         imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
 #ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
-#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/17_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_17.txt", rendering=True)
+#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

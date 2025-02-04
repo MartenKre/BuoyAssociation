@@ -110,8 +110,6 @@ class BuoyAssociation():
         roll = self.imu_data[frame_id][0]
         pitch = self.imu_data[frame_id][1]
 
-        roll, pitch = 0, 0
-
         # Ship: x front, y left, z top (not accounted for roll & pitch)
         # IMU: same as ship but accounted for roll and pitch
         # camera: z front, y bottom, x right
@@ -126,7 +124,7 @@ class BuoyAssociation():
         R = T.getRotationMatrix(yaw, axis='z') @ T.getRotationMatrix(roll, axis='x')
         IMU_T_Cam = np.eye(4)
         IMU_T_Cam[:3,:3] = R 
-        cam_height = 1.8
+        cam_height = 3
         IMU_T_Cam[:3, 3] = np.array([0, 0, cam_height])  # translational part: cam has height of 1.8m 
 
         Ship_T_Cam = Ship_T_IMU @ IMU_T_Cam
@@ -961,6 +959,6 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-# ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
+# ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
 # ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

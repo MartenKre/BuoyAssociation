@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 from DistanceEstimator import DistanceEstimator
 
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
+import utility.Transformations as T
 from utility.GeoData import GetGeoData
 from utility.Rendering import RenderAssociations
 from boxmot import ByteTrack
@@ -26,7 +27,7 @@ import matplotlib.pyplot as plt
 class BuoyAssociation():    
     def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
         self.focal_length = focal_length        # focal length of camera in mm
-        self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
+        self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm (scaled with 2, since FullHD, not 4k)
         self.image_size = img_sz
         self.conf_thresh = 0.25  # used for NMS and BoxMOT (x2) and drawing -> Detections below this thresh won't be considered
         self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conf_thresh, iou_thresh = 0.2)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
@@ -78,7 +79,7 @@ class BuoyAssociation():
                 self.plot_Predictions(pred_dict, name = os.path.basename(image_path).replace(".png", ""), 
                                             folder=plots_folder)
 
-    def getPredictions(self, img, frame_id, moving_average=True):
+    def getPredictions(self, img, frame_id):
         """Function runs inferense, returns Yolov7 preds concatenated with bearing to Objects & ID of BoxMOT
         Prediction dict contains ship pose and predicted buoy positions (in lat,lng)
         Args:
@@ -90,7 +91,7 @@ class BuoyAssociation():
         """
 
         pred = self.distanceEstimator(img)
-        pred = self.getAnglesOfIncidence(pred)  # get pixel center coordinates of BBs and compute lateral angle
+        pred = self.computeLocations(pred, frame_id)
         
         # BoxMOT tracking on predictions
         preds_boxmot_format = pred[:,0:6]    # preds need to be in format [xyxy, conf, classID]
@@ -102,11 +103,63 @@ class BuoyAssociation():
             ids[res[:,-1].to(torch.int32), 0] = res[:, 4].to(torch.float)
         pred = torch.cat((pred, ids), dim=-1)   # pred = [N x [xyxy,conf,classID,dist,angle,ID]]
 
-        if moving_average:
-            pred = self.moving_average(pred, frame_id, method='EMA')
-
         pred_dict = self.BuoyLocationPred(frame_id, pred)   # compute buoy predictions
         return pred, pred_dict
+
+    def computeLocations(self, preds, frame_id):
+        roll = self.imu_data[frame_id][0]
+        pitch = self.imu_data[frame_id][1]
+
+        roll, pitch = 0, 0
+
+        # Ship: x front, y left, z top (not accounted for roll & pitch)
+        # IMU: same as ship but accounted for roll and pitch
+        # camera: z front, y bottom, x right
+        rot_x = T.getRotationMatrix(np.radians(roll), axis='x') 
+        rot_y = T.getRotationMatrix(np.radians(pitch), axis='y')
+        R = rot_y @ rot_x
+        Ship_T_IMU = np.eye(4)
+        Ship_T_IMU[:3, :3] = R
+
+        roll = np.deg2rad(-90)
+        yaw = np.deg2rad(-90)
+        R = T.getRotationMatrix(yaw, axis='z') @ T.getRotationMatrix(roll, axis='x')
+        IMU_T_Cam = np.eye(4)
+        IMU_T_Cam[:3,:3] = R 
+        cam_height = 1.8
+        IMU_T_Cam[:3, 3] = np.array([0, 0, cam_height])  # translational part: cam has height of 1.8m 
+
+        Ship_T_Cam = Ship_T_IMU @ IMU_T_Cam
+
+        # iterate through preds and extract center of lower BB edge
+        dist_z = self.focal_length
+        preds_comp = torch.zeros((preds.size(0), preds.size(1)+1))
+        for i, pred in enumerate(preds):
+            u = pred[0] + (pred[2]-pred[0])/2
+            v = pred[3]
+            # convert pixel coords to x, y in cam space
+            u_0 = self.image_size[0] / 2
+            x = (u - u_0) / self.scale_factor
+            v_0 = self.image_size[1] / 2
+            y = (v - v_0) / self.scale_factor
+            # compute cam ray in ship cs
+            vec1 = np.array([x, y, dist_z, 1])
+            p1 = Ship_T_Cam @ vec1
+            p0 = Ship_T_Cam @ np.array([0, 0, 0, 1])
+            pos_cam = Ship_T_IMU @ np.array([0, 0, cam_height, 1])
+            # compute intersection between cam ray to obj and xy plane in ship cs
+            # plane: 0x + 0y + 1*z = 0
+            v = p1[:3] - p0[:3] # direction vector
+            t = -1 * pos_cam[2] / v[2]  # scalar parameter t
+            coords = pos_cam[:3] + t * v    # intersection point with xy plane, z is 0
+            dist = np.linalg.norm(coords)
+            angle = np.arctan2(coords[1], coords[0])
+            pred = torch.cat((pred[:-1], torch.tensor([dist]), torch.tensor([angle])))
+            preds_comp[i, :] = pred
+
+        return torch.tensor(preds_comp)
+
+
         
     def getAnglesOfIncidence(self, preds):
         """Computes angle of deviation between optical axis of cam and object in x (horizontal direction)
@@ -805,7 +858,7 @@ class BuoyAssociation():
                     break  # End of video
                 
                 # get predictions for frame
-                pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
+                pred, pred_dict = self.getPredictions(frame, frame_id)
 
                 # draw BBs on frame
                 self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0), conf_thresh=self.conf_thresh)

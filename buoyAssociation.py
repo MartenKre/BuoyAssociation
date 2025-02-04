@@ -28,8 +28,8 @@ class BuoyAssociation():
         self.focal_length = focal_length        # focal length of camera in mm
         self.scale_factor = 1 / (2*pixel_size)  # scale factor of camera -> pixel size in mm
         self.image_size = img_sz
-        self.conv_thresh = 0.25  # used for NMS and BoxMOT (x2) -> Detections below this thresh won't be considered
-        self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conv_thresh, iou_thresh = 0.2)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
+        self.conf_thresh = 0.25  # used for NMS and BoxMOT (x2) and drawing -> Detections below this thresh won't be considered
+        self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conf_thresh, iou_thresh = 0.2)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
         self.imu_data = None
         self.RenderObj = None   # render Instance
@@ -265,7 +265,7 @@ class BuoyAssociation():
     
     def initBoxMOT(self):
         return ByteTrack(
-            track_thresh=2 * self.conv_thresh,      # threshold for detection confidence -> seperates BBs into high and low confidence
+            track_thresh=2 * self.conf_thresh,      # threshold for detection confidence -> seperates BBs into high and low confidence
             match_thresh=0.99,                  # matching thresh -> controls max dist allowed between tracklets & detections for a match
             track_buffer=self.track_buffer      # number of frames to keep a track alive after it was last detected
         )
@@ -808,7 +808,7 @@ class BuoyAssociation():
                 pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
 
                 # draw BBs on frame
-                self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0), conf_thresh=self.conv_thresh)
+                self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0), conf_thresh=self.conf_thresh)
 
                 # check if new buoy coords have been set by thread
                 if newBuoyCoords.is_set():
@@ -858,7 +858,7 @@ class BuoyAssociation():
                     color_dict_id[id] = color
                     matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
                     self.computeMatchingConf(int(pred[idx_pred, 8]), filteredBuoys[m[0]], color) # icrease conf of pred gt matched pair
-                    self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conv_thresh)   # draw bounding boxes based on matched indices
+                    self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conf_thresh)   # draw bounding boxes based on matched indices
 
                 if rendering:
                     with lock:  # send data to rendering obj

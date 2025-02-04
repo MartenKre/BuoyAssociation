@@ -7,7 +7,7 @@ from shapely.geometry import Point
 # Class Reads Geojson file containing buoy coordinates and returns locations for a specified position and tilesize
 
 class GetGeoData():
-    def __init__(self, file="/home/marten/Uni/Semester_4/src/BuoyAssociation/utility/data/noaa_navigational_aids.geojson", tile_size = 0.1):
+    def __init__(self, file="utility/data/noaa_navigational_aids.geojson", tile_size = 0.1):
         self.file = file    # path to geojson file
         self.tile_size = tile_size     # size of tile for which buoys are returned (in degrees)
         try:

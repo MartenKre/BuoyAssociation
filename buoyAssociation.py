@@ -669,7 +669,7 @@ class BuoyAssociation():
         result = [(a,b) for a,b in zip(row_ind, col_ind)]   # create tuples of matched indices
         return result
 
-    def getNearbyBuoys(self, ship_pose, buoyCoords, fov_with_padding=100, dist_thresh=1200, nearby_thresh=50):
+    def getNearbyBuoys(self, ship_pose, buoyCoords, fov_with_padding=120, dist_thresh=1200, nearby_thresh=50):
         """function selects nearby gt buoys (relative to ship pos) from a list containing buoy Coordinates
         Args:
             ship_pose: list of form [lat,lng,heading]
@@ -693,7 +693,7 @@ class BuoyAssociation():
             pos_bouy = Ship_T_ECEF @ np.array([x,y,z,1]) # transform buoys from ecef to ship cs
             bearing = np.rad2deg(np.arctan2(pos_bouy[1],pos_bouy[0]))   # compute bearing of buoy
             dist_to_ship = haversineDist(lat, lng, ship_pose[0], ship_pose[1])  # compute dist to ship
-            if abs(bearing) <= fov_with_padding and dist_to_ship <= dist_thresh:
+            if abs(bearing) <= fov_with_padding / 2 and dist_to_ship <= dist_thresh:
                 # include buoys that are within fov+padding and inside maxdist
                 selected_buoys.append((lat, lng))
             elif dist_to_ship <= nearby_thresh:
@@ -906,6 +906,6 @@ ba = BuoyAssociation()
 # imu_dir = os.path.join(test_folder, 'imu') 
 # ba.test(images_dir, imu_dir)
 
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/954_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_954.txt", rendering=True)
-#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
-#ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)
+# ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
+ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
+# ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)

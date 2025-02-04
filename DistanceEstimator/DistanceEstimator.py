@@ -87,9 +87,9 @@ class DistanceEstimator():
             x,y,w,h,conf,cls,dist,angle=BB[:8]
             if conf > conf_thresh:
                 if len(BB) == 9:
-                    annotation = f"{int(BB[8])}, {conf:.2f}, {int(dist)}"
+                    annotation = f"{int(BB[8])}, {conf:.2f}, {int(dist)}m"
                 else:
-                    annotation = f"{conf:.2f}, {int(dist)}"
+                    annotation = f"{conf:.2f}, {int(dist)}m"
                 if color is None:
                     color = get_color_based_on_distance(dist)
                     if color == (0, 250, 250):

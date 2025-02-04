@@ -716,6 +716,8 @@ class BuoyAssociation():
 
         filtered_preds = []
         index_dict = {}
+        if buoysGT == []:
+            return filtered_preds, index_dict
         for i, pred in enumerate(preds):
             distances = list(map(lambda x: haversineDist(*pred, *x), buoysGT))
             closestGT = np.argmin(distances)

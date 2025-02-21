@@ -6,26 +6,19 @@ import os
 import numpy as np
 import torch
 import time
-import tqdm
 from collections import defaultdict
 from scipy.optimize import linear_sum_assignment, minimize
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from torchvision.ops.boxes import box_area
 from pprint import pprint
-
-from DistanceEstimator.utils.general import box_iou
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 from DistanceEstimator import DistanceEstimator
 
 from utility.Transformations import ECEF2LatLng, T_ECEF_Ship, LatLng2ECEF, haversineDist
 from utility.GeoData import GetGeoData
-from utility.Rendering import RenderAssociations
 from boxmot import ByteTrack
-#from utility.LivePlotting import LivePlots
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
 
 class BuoyAssociation():    
     def __init__(self, focal_length=2.75, pixel_size=0.00155, img_sz=[1920, 1080]):
@@ -55,7 +48,8 @@ class BuoyAssociation():
     def test(self, test_dir, video=False):
         # load IMU data
         imu_file = os.path.join(test_dir, "imu_data.json")
-        imu_data = json.loads(imu_file)
+        with open(imu_file, "r") as f:
+            imu_data = json.load(f)
 
         images_dir = os.path.join(test_dir, "images")
         labels_dir = os.path.join(test_dir, "labels")
@@ -103,9 +97,14 @@ class BuoyAssociation():
 
                 bb_pred = pred[idx_pred, 0:4]   # get BB coordinates
                 id = self.BuoyCoordinates.getBuoyID(*filteredBuoys[idx_buoyGT])  # get ID of matchted GT buoy
-                pred_results.append(torch.cat((bb_pred, torch.tensor(id))))
+
+                pred_results.append(torch.cat((bb_pred, torch.tensor([id]))))
                 matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
-            pred_results = self.xyxy2cxcywh(pred_results.as_tensor(), img_dims=self.image_size)
+            if len(pred_results) > 0:
+                pred_results = torch.stack(pred_results)
+                pred_results = self.xyxy2cxcywh(pred_results, img_dims=self.image_size)
+            else:
+                pred_results = torch.zeros((0, 5))
 
             if video:
                 self.decayMatchingConf()    # decay conf for all matched pairs
@@ -115,7 +114,7 @@ class BuoyAssociation():
                 self.correctCameraBias(matched_pairs, pred_dict['ship'], pred)
 
             # get corresponding labels file 
-            labels = self.loadLabels(labels_dir.replace(".png", ".txt"))
+            labels = self.loadLabels(os.path.join(labels_dir, image.replace(".png", ".txt")))
             self.computeMetrics(labels, pred_results)
 
             frame_id += 1
@@ -136,15 +135,20 @@ class BuoyAssociation():
         fp = 0
         fn = 0
         for label in labels:  # check labels
+            matched = False
             for pred in preds:
                 if label[-1] == pred[-1]:   # if id in pred and label match, check for iou
-                    if self.box_iou(label[:-1], pred[:-1]) > iou_thresh:
+                    bb_l = self.box_cxcywh_to_xyxy(label[:-1].unsqueeze(0))
+                    bb_p = self.box_cxcywh_to_xyxy(pred[:-1].unsqueeze(0))
+                    if self.box_iou(bb_l, bb_p) > iou_thresh:
                         tp += 1     # if iou_thresh is exceeded, pred is tp
                     else:           # if iou_thresh is not exceeded
                         fn += 1     # label is fn, since no correct matched pred exists
                         fp += 1     # pred with bouy id is fp since in wrong place
-                    continue
-            fn += 1
+                    matched=True
+                    break
+            if not matched:
+                fn += 1
 
         covered_ids = labels[:,-1]
         for pred in preds:  # check remaining preds -> predictions that do not occur in labels are FP
@@ -169,20 +173,25 @@ class BuoyAssociation():
         union = area1[:, None] + area2 - inter
 
         iou = inter / union
-        return iou, union
+        return iou
 
-    def xyxy2cxcywh(self, preds, img_dims=[1920, 1080]):
-        preds[0] = preds[0] + (preds[2] - preds[0]) / 2
-        preds[1] = preds[1] + (preds[3] - preds[1]) / 2
-        preds[2] = (preds[2] - preds[0])
-        preds[3] = (preds[3] - preds[1])
-        preds[0:4:2] /= img_dims[0] 
-        preds[1:4:2] /= img_dims[1] 
-        return preds
+    def xyxy2cxcywh(self, x, img_dims=[1920, 1080]):
+        w, h = img_dims
+        x0, y0, x1, y1, id = x.unbind(-1)
+        b = [(x0 + x1) / (2*w), (y0 + y1) / (2*h),
+            (x1 - x0) / w, (y1 - y0) / h, id]
+        return torch.stack(b, dim=-1)
+
+    def box_cxcywh_to_xyxy(self, x):
+        x_c, y_c, w, h = x.unbind(-1)
+
+        b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
+            (x_c + 0.5 * w), (y_c + 0.5 * h)]
+        return torch.stack(b, dim=-1)
 
     def loadLabels(self, path_to_file):
         if not isfile(path_to_file):
-            raise ValueError(r"Labels File {path_to_file} does not exits")
+            raise ValueError(f"Labels File {path_to_file} does not exits")
 
         data = []
         with open(path_to_file, "r") as f:
@@ -229,7 +238,7 @@ class BuoyAssociation():
         if moving_average:
             pred = self.moving_average(pred, frame_id, method='EMA')
 
-        pred_dict = self.buoyLocationPred(ship_pose, pred)   # compute buoy predictions
+        pred_dict = self.buoyLocationPred(pred, ship_pose)   # compute buoy predictions
         return pred, pred_dict
         
     def getAnglesOfIncidence(self, preds):

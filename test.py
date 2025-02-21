@@ -42,7 +42,7 @@ class BuoyAssociation():
         self.dist_thresh_close = 0.35
         self.isclose = 150
 
-        self.metrics = {"tp": 0, "fp": 0, "fn": 0}
+        self.metrics = {"tp": 0, "fp": 0, "fn": 0, "IoU": 0, "tp_match": 0, "fp_match": 0, "fn_match": 0}
 
 
     def test(self, test_dir, video=False):
@@ -120,8 +120,16 @@ class BuoyAssociation():
             frame_id += 1
 
         print("Testing Done")
+        self.print_metrics()
+
+    def print_metrics(self):
         print("Results:")
-        pprint(self.metrics)
+        self.metrics["Precision"] = self.metrics["tp"] / (self.metrics["tp"]+ self.metrics["fp"])
+        self.metrics["Recall"] = self.metrics["tp"] / (self.metrics["tp"]+ self.metrics["fn"])
+        self.metrics["F1-Score"] = 2 * self.metrics["Precision"] * self.metrics["Recall"] / (self.metrics["Recall"]+ self.metrics["Precision"])
+        self.metrics["Mean-IoU"] = self.metrics["IoU"] / self.metrics["tp_match"]
+        for k,v in self.metrics.items():
+            print(f"{k}:".ljust(5), v)
 
 
     def computeMetrics(self, labels, preds, iou_thresh=0.5):
@@ -140,20 +148,25 @@ class BuoyAssociation():
                 if label[-1] == pred[-1]:   # if id in pred and label match, check for iou
                     bb_l = self.box_cxcywh_to_xyxy(label[:-1].unsqueeze(0))
                     bb_p = self.box_cxcywh_to_xyxy(pred[:-1].unsqueeze(0))
-                    if self.box_iou(bb_l, bb_p) > iou_thresh:
+                    iou = self.box_iou(bb_l, bb_p)
+                    if iou > iou_thresh:
                         tp += 1     # if iou_thresh is exceeded, pred is tp
                     else:           # if iou_thresh is not exceeded
                         fn += 1     # label is fn, since no correct matched pred exists
                         fp += 1     # pred with bouy id is fp since in wrong place
                     matched=True
+                    self.metrics['IoU'] += iou
+                    self.metrics['tp_match'] += 1
                     break
             if not matched:
                 fn += 1
+                self.metrics["fn_match"] += 1
 
         covered_ids = labels[:,-1]
         for pred in preds:  # check remaining preds -> predictions that do not occur in labels are FP
             if pred[-1] not in covered_ids:
                 fp += 1
+                self.metrics["fp_match"] += 1
 
         self.metrics["tp"] += tp
         self.metrics["fp"] += fp

@@ -78,7 +78,7 @@ buoyGTData = GetGeoData()
 
 os.makedirs(os.path.join(target_dir, "images"), exist_ok=True)
 os.makedirs(os.path.join(target_dir, "labels"), exist_ok=True)
-imu_test_file = os.path.join(target_dir, 'img_data' + '.json')
+imu_test_file = os.path.join(target_dir, 'imu_data' + '.json')
 imu_dict = {}
 sample_counter = 0
 

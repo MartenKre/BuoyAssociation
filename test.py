@@ -1,15 +1,19 @@
+import json
+from os.path import isfile
 import cv2
 import sys
 import os
 import numpy as np
 import torch
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import threading
 import time
+import tqdm
 from collections import defaultdict
 from scipy.optimize import linear_sum_assignment, minimize
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from torchvision.ops.boxes import box_area
+from pprint import pprint
+
+from DistanceEstimator.utils.general import box_iou
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DistanceEstimator'))
 from DistanceEstimator import DistanceEstimator
@@ -31,15 +35,11 @@ class BuoyAssociation():
         self.conf_thresh = 0.25  # used for NMS and BoxMOT (x2) and drawing -> Detections below this thresh won't be considered
         self.distanceEstimator = DistanceEstimator(img_size = 1024, conv_thresh = self.conf_thresh, iou_thresh = 0.2)    # load Yolov7 with Distance Module, conv & iou_thresh for NMS
         self.BuoyCoordinates = GetGeoData(tile_size=0.02) # load BuoyData from GeoJson
-        self.imu_data = None
-        self.RenderObj = None   # render Instance
         self.track_buffer = 60   # after exceeding thresh (frames count) a lost will be reassigned new ID 
         self.MOT = self.initBoxMOT()        # Multi Object Tracker Instance
         self.ma_storage = {}    # dict to store moving averages
         self.matching_confidence = {}
         self.matching_confidence_plotting = {}
-        self.axes = []
-        self.curves = {}
         self.fl_bias = [0]  # focal length bias
         self.heading_bias = [0] # heading bias
         self.use_biases = True
@@ -49,41 +49,161 @@ class BuoyAssociation():
         self.dist_thresh_close = 0.35
         self.isclose = 150
 
+        self.metrics = {"tp": 0, "fp": 0, "fn": 0}
 
-    def test(self, images_dir, labels_dir, imu_dir, plots=True):
-        #function tests performance of BuoyAssociation on Labeled Set of Images including BuoyGT
 
-        if plots:
-            plots_folder = self.create_run_directory(path="detections/")
-        self.imu_data = self.getIMUData(imu_dir)   # load IMU data
+    def test(self, test_dir, video=False):
+        # load IMU data
+        imu_file = os.path.join(test_dir, "imu_data.json")
+        imu_data = json.loads(imu_file)
 
-        for image in os.listdir(images_dir):   
+        images_dir = os.path.join(test_dir, "images")
+        labels_dir = os.path.join(test_dir, "labels")
+
+        if not video:
+            self.use_biases = False
+
+
+        frame_id = 0
+        for image in tqdm(os.listdir(images_dir)):   
             image_path = os.path.join(images_dir, image) 
-            print("image: ", image_path)
             img = cv2.imread(image_path)
-            if img is None:
-                print(f"Could not read {image_path}")
-                continue
-            idx = int(os.path.basename(image_path).replace(".png", "")) -1  # frame name to imu index -> frames start with 1, IMU with 0
-            pred, pred_dict = self.getPredictions(img, idx, moving_average=False)
+            ship_pose = imu_data[image.replace(".png", "")]
 
-            labels = self.getLabelsData(labels_dir, image_path)
-            labels_wo_gps = [x[:-1] for x in labels]
-            buoyLabels = [x[-1] for x in labels]
-            pred_dict["buoys_labeled"] = buoyLabels      
+            # get inference predictions
+            if video:
+                pred, pred_dict = self.getPredictions(img, frame_id, ship_pose, moving_average=True, boxMOT=True)
+            else:
+                pred, pred_dict = self.getPredictions(img, frame_id, ship_pose, moving_average=False, boxMOT=False)
 
-            if plots:
-                self.distanceEstimator.plot_inference_results(pred, img, name=os.path.basename(image_path), 
-                                                                folder=plots_folder, labelsData=labels_wo_gps)
-                self.plot_Predictions(pred_dict, name = os.path.basename(image_path).replace(".png", ""), 
-                                            folder=plots_folder)
+            # get nearby buoys 
+            buoyCoords = self.BuoyCoordinates.getBuoyLocations(ship_pose[0], ship_pose[1])
 
-    def getPredictions(self, img, frame_id, moving_average=True):
+            # extract relevant gt buoys for the current frame from the buoyCoords file
+            filteredBuoys = self.getNearbyBuoys(ship_pose, buoyCoords)
+            # filter buoy predictions (NNS & relative Thresholding)
+            filteredPreds, idx_dict = self.filterPreds(pred_dict['ship'], pred_dict['buoy_predictions'], filteredBuoys)
+            matching_results = []
+            if len(filteredBuoys) > 0 and len(filteredPreds) > 0:
+                # pass extracted buoys and predictions to matching 
+                matching_results = self.matching(filteredPreds, filteredBuoys)
+                # different buoy far away -> remove this bb from the matching results
+                matching_results = self.postprocessMatching(matching_results, filteredBuoys, filteredPreds, pred_dict['ship'])
+            
+            # go through matched buoys
+            pred_results = []
+            matched_pairs = {}  # dict that contains the matched pairs (pred / buoy gt) -> lat/lng coords and pred idx
+            for i, m in enumerate(matching_results):
+                # get ID of pred
+                idx_pred = idx_dict[m[1]]
+                idx_buoyGT = m[0]
+
+                if video:
+                    self.computeMatchingConf(int(pred[idx_pred, 8]), filteredBuoys[m[0]]) # icrease conf of pred gt matched pair
+
+                bb_pred = pred[idx_pred, 0:4]   # get BB coordinates
+                id = self.BuoyCoordinates.getBuoyID(*filteredBuoys[idx_buoyGT])  # get ID of matchted GT buoy
+                pred_results.append(torch.cat((bb_pred, torch.tensor(id))))
+                matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
+            pred_results = self.xyxy2cxcywh(pred_results.as_tensor(), img_dims=self.image_size)
+
+            if video:
+                self.decayMatchingConf()    # decay conf for all matched pairs
+
+            if video:
+                # compute heading bias & focal length delta
+                self.correctCameraBias(matched_pairs, pred_dict['ship'], pred)
+
+            # get corresponding labels file 
+            labels = self.loadLabels(labels_dir.replace(".png", ".txt"))
+            self.computeMetrics(labels, pred_results)
+
+            frame_id += 1
+
+        print("Testing Done")
+        print("Results:")
+        pprint(self.metrics)
+
+
+    def computeMetrics(self, labels, preds, iou_thresh=0.5):
+        """ Computes Metrics (TP,FP,FN) for given preds and labels containing normalized BB coords and BuoyIDs
+        Args:
+            labels: tensor (n, 5) -> [cx, cy, w, h, buoy_id]
+            preds: tensor (m, 5) -> [cx, cy, w, h, buoy_id]
+            iou_thresh: threshold to consider an object as detected based on intersection over union 
+        """
+        tp = 0
+        fp = 0
+        fn = 0
+        for label in labels:  # check labels
+            for pred in preds:
+                if label[-1] == pred[-1]:   # if id in pred and label match, check for iou
+                    if self.box_iou(label[:-1], pred[:-1]) > iou_thresh:
+                        tp += 1     # if iou_thresh is exceeded, pred is tp
+                    else:           # if iou_thresh is not exceeded
+                        fn += 1     # label is fn, since no correct matched pred exists
+                        fp += 1     # pred with bouy id is fp since in wrong place
+                    continue
+            fn += 1
+
+        covered_ids = labels[:,-1]
+        for pred in preds:  # check remaining preds -> predictions that do not occur in labels are FP
+            if pred[-1] not in covered_ids:
+                fp += 1
+
+        self.metrics["tp"] += tp
+        self.metrics["fp"] += fp
+        self.metrics["fn"] += fn
+       
+        
+    def box_iou(self, boxes1, boxes2):
+        area1 = box_area(boxes1)
+        area2 = box_area(boxes2)
+
+        lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
+        rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
+
+        wh = (rb - lt).clamp(min=0)  # [N,M,2]
+        inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+
+        union = area1[:, None] + area2 - inter
+
+        iou = inter / union
+        return iou, union
+
+    def xyxy2cxcywh(self, preds, img_dims=[1920, 1080]):
+        preds[0] = preds[0] + (preds[2] - preds[0]) / 2
+        preds[1] = preds[1] + (preds[3] - preds[1]) / 2
+        preds[2] = (preds[2] - preds[0])
+        preds[3] = (preds[3] - preds[1])
+        preds[0:4:2] /= img_dims[0] 
+        preds[1:4:2] /= img_dims[1] 
+        return preds
+
+    def loadLabels(self, path_to_file):
+        if not isfile(path_to_file):
+            raise ValueError(r"Labels File {path_to_file} does not exits")
+
+        data = []
+        with open(path_to_file, "r") as f:
+            data = f.read().splitlines()
+
+        res = torch.zeros((len(data), 5))
+        for i,line in enumerate(data):
+            elems = line.split(" ")
+            elems = [float(x) for x in elems]
+            res[i,:] = torch.tensor(elems, dtype=torch.float32)
+
+        return res
+
+
+    def getPredictions(self, img, frame_id, ship_pose, moving_average=True, boxMOT=True):
         """Function runs inferense, returns Yolov7 preds concatenated with bearing to Objects & ID of BoxMOT
         Prediction dict contains ship pose and predicted buoy positions (in lat,lng)
         Args:
             Img: pixel array
             frame_id: current frame ID
+            ship_pose: list [lat, lng, heading]
         Returns:
             preds: (n,8) tensor [xyxy, conf, cls, dist, angle, ID]
             pred_dict dict containing "ship": [lat, lng, heading] and "buoy_predictions": [[lat1,lng1], ...]
@@ -93,19 +213,23 @@ class BuoyAssociation():
         pred = self.getAnglesOfIncidence(pred)  # get pixel center coordinates of BBs and compute lateral angle
         
         # BoxMOT tracking on predictions
-        preds_boxmot_format = pred[:,0:6]    # preds need to be in format [xyxy, conf, classID]
-        preds_boxmot_format = np.array(preds_boxmot_format)
-        res = self.MOT.update(preds_boxmot_format, img)   # res --> M X (x, y, x, y, id, conf, cls, ind)
-        res = torch.from_numpy(res)
-        ids = -1*torch.ones(size=(pred.size()[0], 1))   # default case -1
-        if len(res) > 0:
-            ids[res[:,-1].to(torch.int32), 0] = res[:, 4].to(torch.float)
-        pred = torch.cat((pred, ids), dim=-1)   # pred = [N x [xyxy,conf,classID,dist,angle,ID]]
+        if boxMOT:
+            preds_boxmot_format = pred[:,0:6]    # preds need to be in format [xyxy, conf, classID]
+            preds_boxmot_format = np.array(preds_boxmot_format)
+            res = self.MOT.update(preds_boxmot_format, img)   # res --> M X (x, y, x, y, id, conf, cls, ind)
+            res = torch.from_numpy(res)
+            ids = -1*torch.ones(size=(pred.size()[0], 1))   # default case -1
+            if len(res) > 0:
+                ids[res[:,-1].to(torch.int32), 0] = res[:, 4].to(torch.float)
+            pred = torch.cat((pred, ids), dim=-1)   # pred = [N x [xyxy,conf,classID,dist,angle,ID]]
+        else:
+            ids = -1*torch.ones(size=(pred.size()[0], 1))   # default case -1
+            pred = torch.cat((pred, ids), dim=-1)   # pred = [N x [xyxy,conf,classID,dist,angle,ID]]
 
         if moving_average:
             pred = self.moving_average(pred, frame_id, method='EMA')
 
-        pred_dict = self.BuoyLocationPred(frame_id, pred)   # compute buoy predictions
+        pred_dict = self.buoyLocationPred(ship_pose, pred)   # compute buoy predictions
         return pred, pred_dict
         
     def getAnglesOfIncidence(self, preds):
@@ -194,22 +318,21 @@ class BuoyAssociation():
             result += sequence[i-1-j] * (1-alpha) * alpha ** j
         return result
     
-    def BuoyLocationPred(self, frame_id, preds):
+    def buoyLocationPred(self, preds, ship_pose):
         """for each BB prediction function computes the Buoy Location based on Dist & Angle of the tensor
         Args:
-            frame_id: ID of current frame
             preds: prediction tensor of yolov7 (N,8) -> [Nx[xyxy, conf, cls, dist, angle]]
+            ship_pose: [lat, lng, heading]
         Returns:
             Dict{"ship:"[lat,lng,heading], "buoy_prediction":[[lat1,lng1],[lat2,lng2]]}
         """
 
-        latCam = self.imu_data[frame_id][3]
-        lngCam = self.imu_data[frame_id][4]
+        latCam = ship_pose[0]
+        lngCam = ship_pose[1]
+        heading = ship_pose[2]
         if self.use_biases:
             heading_bias = self.computeEma(self.heading_bias)
-            heading = self.imu_data[frame_id][2] - np.rad2deg(heading_bias)
-        else:
-            heading = self.imu_data[frame_id][2]
+            heading = heading - np.rad2deg(heading_bias)
 
         # trasformation:    latlng to ecef, ecef to enu, enu to ship
         x, y, z = LatLng2ECEF(latCam, lngCam)  # ship coords in ECEF
@@ -229,40 +352,6 @@ class BuoyAssociation():
 
         return {"buoy_predictions": buoysLatLng, "ship": [latCam, lngCam, heading]}
 
-    def getLabelsData(self, labels_dir, image_path):
-        labelspath = os.path.join(labels_dir, os.path.basename(image_path) + ".json")
-        if os.path.exists(labelspath):
-            return self.distanceEstimator.LabelsJSONFormat(labelspath)
-        else:
-            print(f"LablesFile not found: {labelspath}")
-            return []
-        
-    def getIMUData(self, path):
-        # function returns IMU data as list
-
-        if os.path.isfile(path):
-            result = []
-            with open(path, 'r') as f:
-                data = f.readlines()
-                for line in data:
-                    content = line.split(",")
-                    line = [float(x) for x in content]
-                    result.append(line)
-        else:
-            files = os.listdir(path)
-            filename = [f for f in files if f.endswith('.txt')][0]
-            path = os.path.join(path, filename)
-            result = []
-            with open(path, 'r') as f:
-                data = f.readlines()
-                for line in data:
-                    content = line.split(",")
-                    line = [float(x) for x in content]
-                    result.append(line)
-            if len(result) == 0:
-                print("No IMU data found, check path: {path}")
-        return result
-    
     def initBoxMOT(self):
         return ByteTrack(
             track_thresh=2 * self.conf_thresh,      # threshold for detection confidence -> seperates BBs into high and low confidence
@@ -330,114 +419,11 @@ class BuoyAssociation():
         plt.savefig(os.path.join(folder, name+".pdf"), dpi=300)
         plt.close()
     
-    def plot_Predictions_to_map(self, data, zoom=1.5, name="buoyPredictions", folder=""):
-        # func expects a dict containing predicted buoys and ship as key and the lat lon pairs as values
-
-        ship_lat, ship_lon, heading = data["ship"]
-        
-        # Create figure with Cartopy projection
-        fig, ax = plt.subplots(figsize=(10, 10),
-                            subplot_kw={'projection': ccrs.PlateCarree()})
-        ax.set_extent([ship_lon - zoom, ship_lon + zoom, ship_lat - zoom, ship_lat + zoom])
-
-        # Add map features
-        ax.add_feature(cfeature.LAND)
-        ax.add_feature(cfeature.COASTLINE)
-        ax.add_feature(cfeature.BORDERS, linestyle=':')
-        ax.add_feature(cfeature.OCEAN, color='lightblue')
-        
-        # Plot buoy predictions in red
-        buoypreds = data["buoy_predictions"]
-        for lat, lon in buoypreds:
-            ax.plot(lon, lat, 'ro', markersize=8, transform=ccrs.PlateCarree(), label="Buoy Predictions")
-
-        # Plot buoys in green if they exist
-        if "buoys_labeled" in data:
-            buoys = data["buoys_labeled"]
-            if buoys:
-                for lat, lon in buoys:
-                    ax.plot(lon, lat, 'go', markersize=8, transform=ccrs.PlateCarree(), label="Buoys")
-
-        # Plot ship in blue with heading
-        ax.plot(ship_lon, ship_lat, 'b^', markersize=12, transform=ccrs.PlateCarree(), label="Ship")
-        # Add legend and labels
-        plt.legend(loc="upper right")
-        plt.title("Ship and Buoy Positions")
-        path = os.path.join(folder, name+"_buoys.pdf")
-        plt.savefig(path)
-
-    def getColor(self, color_dict, frameID, id):
-        # returns colordict with new entry & color added for ID. Removes old entries
-
-        color_table = [(255/255, 255/255, 0, 1),
-                       (102/255, 0, 102/255, 1),
-                       (0, 255/255, 255/255, 1),
-                       (255/255, 153/255, 255/255, 1),
-                       (153/255, 102/255, 51/255, 1),
-                       (255/255,153/155, 0, 1),
-                       (224/255, 224/255, 224/255, 1),
-                       (128/255, 128/255, 0, 1)
-                       ]
-
-        # clean up color_dict by removing id,color pairs that are old
-        for k in list(color_dict.keys()):
-            if (frameID - color_dict[k]['frame']) > self.track_buffer or k<0:
-                del color_dict[k]
- 
-        # add new id with color to dict   
-        clr = (90/255, 90/255, 90/255, 1)    # default color if all other colors are already taken    
-        for color in color_table:
-            if color not in [color_dict[k]["color"] for k in color_dict]:
-                clr = color
-                break
-        color_dict[id] = {'color': clr, 'frame':frameID}
-
-        return color_dict
-
-    def create_run_directory(self, base_name="run", path=""):
-        i = 0
-        while True:
-            folder_name = f"{base_name}{i if i > 0 else ''}"
-            if not os.path.exists(os.path.join(path, folder_name)):
-                path_to_folder = os.path.join(path, folder_name)
-                os.makedirs(path_to_folder)
-                print(f"Created directory: {path_to_folder} to store plots")
-                return path_to_folder
-            i += 1
-
-    def displayFPS(self, frame, prev_frame_time):
-        # function displays FPS on frame
-
-        font = cv2.FONT_HERSHEY_DUPLEX
-        new_frame_time = time.time() 
-        fps= 1/(new_frame_time-prev_frame_time) 
-        prev_frame_time = new_frame_time 
-        fps = int(fps) 
-        fps = str(fps) 
-        cv2.putText(frame, fps, (10, 15), font, 0.5, (50, 50, 50)) 
-        return new_frame_time
-    
-    def biasStatus(self, frame):
-        font = cv2.FONT_HERSHEY_DUPLEX
-        txt = "Correction:"
-        cv2.putText(frame, txt, (10, 30), font, 0.5, (50, 50, 50)) 
-        txt = "ON" if self.use_biases else "OFF"
-        color = (0, 0, 255) if not self.use_biases else (0, 200, 0)
-        cv2.putText(frame, txt, (100, 30), font, 0.5, color)
-        if self.use_biases:
-            fl_bias = self.computeEma(self.fl_bias)
-            txt = f"FL: {round(fl_bias,3)} [mm]"
-            cv2.putText(frame, txt, (10, 45), font, 0.5, (50, 50, 50)) 
-            heading_bias = self.computeEma(self.heading_bias)
-            txt = f"HD: {round(np.rad2deg(heading_bias),3)} [deg]"
-            cv2.putText(frame, txt, (10, 60), font, 0.5, (50, 50, 50)) 
-
-    
     def Coords2Hash(self, coords):
         # takes a tuple of lat, lng coordinates and returns a unique hash key as string
         return str(coords[0])+str(coords[1])
     
-    def computeMatchingConf(self, id, buoyGT, color): 
+    def computeMatchingConf(self, id, buoyGT): 
         # for each gt buoy compute confidence of all predictions ids in the past
 
         conf_multiplier = 1 / 15
@@ -458,64 +444,6 @@ class BuoyAssociation():
                 self.matching_confidence[k][id] -= conf_decay
                 if self.matching_confidence[k][id] < 0:
                     self.matching_confidence[k][id] = 0
-
-    def updatePlots(self, fig, current_frame):
-        # updates live plots based on matching confidence data
-
-        import pyqtgraph as pg
-
-        data = self.matching_confidence_plotting
-
-        size = len([k for k in data])
-        if size == 0 or current_frame == 0:
-            return 
-
-        for i,k in enumerate(data):
-            ax = None
-            r = i // 4
-            c = i % 4
-            if i >= len(self.axes):
-                ax = fig.addPlot(row=r, col=c, title='')
-                self.axes.append(ax)
-            else:
-                ax = self.axes[i]
-            for id in data[k]:
-                key = str(k)+'_'+str(id)
-                hist = min(500, len(data[k][id]['data']))
-                color = tuple(x*255 for x in list(data[k][id]['color']))
-
-                if data[k][id]['lastframe'] < current_frame-hist:
-                    # if last time buoy has conv > 0 is older than hist, remove line
-                    if key in self.curves:
-                        ax.removeItem(self.curves[key]) 
-                        del self.curves[key]
-                    continue
-
-                y = data[k][id]['data'][-1*hist:]
-                x = np.arange(current_frame-hist+1, current_frame+1)
-
-                if key in self.curves:
-                    self.curves[key].setData(x, y)
-                else:
-                    newCurve = ax.plot(pen=pg.mkPen(color))
-                    newCurve.setData(x,y)
-                    self.curves[key] = newCurve
-
-    def prepareData(self, color_dict, frame):
-        # prepares data for live plotting of matched confidence
-
-        for k in self.matching_confidence:
-            if k not in self.matching_confidence_plotting:
-                self.matching_confidence_plotting[k] = {}
-
-            for id in self.matching_confidence[k]:
-                if id in self.matching_confidence_plotting[k]:
-                    self.matching_confidence_plotting[k][id]['data'].append(self.matching_confidence[k][id])
-                    if self.matching_confidence[k][id] > 0:
-                        self.matching_confidence_plotting[k][id]['lastframe'] = frame
-                else:
-                    color = (0.2, 0.2, 0.2, 1) if id < 0 else color_dict[id]
-                    self.matching_confidence_plotting[k][id] = {'data': [self.matching_confidence[k][id]], 'color': color, 'lastframe': frame}
 
     def correctCameraBias(self, matched_pairs, ship, preds):
         """Computes heading and Focal Length bias based on bearing of pred & GT buoy pairs
@@ -747,167 +675,7 @@ class BuoyAssociation():
 
         return matchings_filtered
 
-    def video(self, video_path, imu_path, rendering=False):
-        # run buoy association on video
-
-        if not rendering:
-           self.processVideo(video_path, imu_path, rendering) 
-        else:
-            # initialize Rendering Framework with data
-            lock = threading.Lock()
-            self.RenderObj = RenderAssociations(lock, parent=self)
-            self.imu_data = self.getIMUData(imu_path)
-            lat_start = self.imu_data[0][3]
-            lng_start = self.imu_data[0][4]
-            heading_start = self.imu_data[0][2]
-            self.RenderObj.initTransformations(lat_start, lng_start, heading_start) # initialize Transformation Matrices with pos & heading of first frame
-            # start thread to run video processing 
-            processing_thread = threading.Thread(target=self.processVideo, args=(video_path, imu_path, rendering, True, lock), daemon=True)
-            processing_thread.start()
-            # start rendering
-            self.RenderObj.run()
-
-    def processVideo(self, video_path, imu_path, rendering, livePlotting = False, lock=None):     
-        # function computes predictions, and performs matching for each frame of video
-
-        # live plotting
-        import pyqtgraph as pg
-        if livePlotting:
-            matchConfPlt = pg.GraphicsLayoutWidget()
-            matchConfPlt.show()
-
-        # load IMU data
-        self.imu_data = self.getIMUData(imu_path)
-
-        # load geodata
-        lat_start = self.imu_data[0][3]
-        lng_start = self.imu_data[0][4]
-        buoyCoords = self.BuoyCoordinates.getBuoyLocations(lat_start, lng_start)
-        newBuoyCoords = threading.Event()   # event that new data has arrived from thread
-        results_list = []
-        #self.BuoyCoordinates.plotBuoyLocations(buoyCoords)
-
-        cap = cv2.VideoCapture(video_path)
-        current_time = time.time()
-        color_assignment = {}
-
-        # Check if the video opened successfully
-        if not cap.isOpened():
-            print("Error: Could not open video.")
-            exit()
-
-        frame_id = 0
-        paused = False
-        while cap.isOpened():
-            if not paused:
-                ret, frame = cap.read()
-                if not ret:
-                    break  # End of video
-                
-                # get predictions for frame
-                pred, pred_dict = self.getPredictions(frame, frame_id, moving_average=True)
-
-                # draw BBs on frame
-                self.distanceEstimator.drawBoundingBoxes(frame, pred, color=(1,0,0), conf_thresh=self.conf_thresh)
-
-                # check if new buoy coords have been set by thread
-                if newBuoyCoords.is_set():
-                    newBuoyCoords.clear()   # clear event flag
-                    buoyCoords = results_list   # copy results list
-                    results_list = []   # clear results list
-                
-                # check if buoydata needs to be reloaded
-                refresh = self.BuoyCoordinates.checkForRefresh(pred_dict["ship"][0], pred_dict["ship"][1])
-                if refresh:
-                    # load new buoycoords in seperate thread 
-                    print("refreshing buoy coords")
-                    t = threading.Thread(target=self.BuoyCoordinates.getBuoyLocationsThreading, 
-                                                args=(pred_dict["ship"][0], pred_dict["ship"][1],results_list, newBuoyCoords), daemon=True)
-                    t.start()
-                
-                # extract relevant gt buoys for the current frame from the buoyCoords file
-                filteredBuoys = self.getNearbyBuoys(pred_dict["ship"], buoyCoords)
-                # filter buoy predictions (NNS & relative Thresholding)
-                filteredPreds, idx_dict = self.filterPreds(pred_dict['ship'], pred_dict['buoy_predictions'], filteredBuoys)
-                matching_results = []
-                if len(filteredBuoys) > 0 and len(filteredPreds) > 0:
-                    # pass extracted buoys and predictions to matching 
-                    matching_results = self.matching(filteredPreds, filteredBuoys)
-                    # different buoy far away -> remove this bb from the matching results
-                    matching_results = self.postprocessMatching(matching_results, filteredBuoys, filteredPreds, pred_dict['ship'])
-                
-                # compute color based on matching results
-                color_dict_preds = {}
-                color_dict_gt = {}
-                color_dict_id = {}
-                matched_pairs = {}  # dict that contains the matched pairs (pred / buoy gt) -> lat/lng coords and pred idx
-                for i, m in enumerate(matching_results):
-                    # get ID of BB
-                    idx_pred = idx_dict[m[1]]   # remap matching index to pred index
-                    id = int(pred[idx_pred, 8])
-                    if id not in color_assignment or id==-1:  # if id has no color so far add it to color dict
-                        if id == -1:    # if box is not currently tracked (-1), assign unique negative id
-                            id = -1*i
-                        color_assignment = self.getColor(color_assignment, frame_id, id)
-                        color = color_assignment[id]['color']
-                    else:   # if id already has assigned color, use this color
-                        color = color_assignment[id]['color']
-                        color_assignment[id]['frame'] = frame_id
-                    color_dict_preds[idx_pred] = color
-                    color_dict_gt[m[0]] = color
-                    color_dict_id[id] = color
-                    matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
-                    self.computeMatchingConf(int(pred[idx_pred, 8]), filteredBuoys[m[0]], color) # icrease conf of pred gt matched pair
-                    self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conf_thresh)   # draw bounding boxes based on matched indices
-
-                if rendering:
-                    with lock:  # send data to rendering obj
-                        self.RenderObj.setShipData(*pred_dict["ship"])
-                        self.RenderObj.setPreds(pred_dict["buoy_predictions"], color_dict_preds)
-                        self.RenderObj.setBuoyGT(filteredBuoys, color_dict_gt)
-
-                self.decayMatchingConf()    # decay conf for all matched pairs
-
-                # compute heading bias & focal length delta
-                self.correctCameraBias(matched_pairs, pred_dict['ship'], pred)
-
-                # plot live data
-                self.prepareData(color_dict_id, frame_id)
-                if livePlotting:
-                    if frame_id % 15 == 0:
-                        self.updatePlots(matchConfPlt, frame_id)
-
-                # display FPS
-                current_time = self.displayFPS(frame, current_time)
-                # display Bias status
-                self.biasStatus(frame)
-
-                # Display the frame (optional for real-time applications)
-                cv2.imshow("Buoy Association", frame)
-                frame_id += 1
-
-            key = cv2.waitKey(1)
-            # Press 'q' to exit the loop
-            if key == ord('q'):
-                break
-
-            if key == 32:
-                cv2.waitKey(-1)
-
-            if key == ord('b'): # if b is pressed, computed biases for heading & FL will be used / not used
-                self.use_biases = not self.use_biases
-
-        # Release resources
-        cap.release()
-        cv2.destroyAllWindows()
 
 ba = BuoyAssociation()
 
-# test_folder = "/home/marten/Uni/Semester_4/src/Trainingdata/labeled/Testdata/954_2_Pete2"
-# images_dir = os.path.join(test_folder, 'images') 
-# imu_dir = os.path.join(test_folder, 'imu') 
-# ba.test(images_dir, imu_dir)
-
-ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/955_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_955.txt", rendering=True)
-# ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/19_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/videos_from_training/furuno_19.txt", rendering=True)
-# ba.video(video_path="/home/marten/Uni/Semester_4/src/TestData/22_2.avi", imu_path="/home/marten/Uni/Semester_4/src/TestData/furuno_22.txt", rendering=True)
+ba.test(test_dir="/home/marten/Uni/Semester_4/src/Trainingdata/Generated_Sets/YOLO_Testset")

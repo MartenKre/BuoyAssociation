@@ -9,7 +9,7 @@ import json
 from os.path import isdir
 import numpy as np
 import shutil
-from GeoData import GetGeoData
+from utility.GeoData import GetGeoData
 
 def labelsJSON2Yolo(labels):
     # fuction converts json data to yolo format with corresponding buoy ID
@@ -22,7 +22,7 @@ def labelsJSON2Yolo(labels):
 
             id = buoyGTData.getBuoyID(lat_BB, lng_BB)
             if id == 0 or id is None or id == "null":
-                raise ValueError("Invalid Buoy ID encountered")
+                raise ValueError(f"Invalid Buoy ID encountered: Buoy ID {id}")
 
             # get BB info in yolo format
             x1 = BB["x1"]
@@ -33,11 +33,12 @@ def labelsJSON2Yolo(labels):
             bbCenterY = ((y1 + y2) / 2) / 1080 
             bbWidth = (x2-x1) / 1920 
             bbHeight = (y2-y1) / 1080 
-            bbInfo = str(bbCenterX) + " " + str(bbCenterY) + " " + str(bbWidth) + " " + str(bbHeight) + " " + id + "\n"
+            bbInfo = str(bbCenterX) + " " + str(bbCenterY) + " " + str(bbWidth) + " " + str(bbHeight) + " " + str(id) + "\n"
 
             result.append(bbInfo)
 
     return result 
+
 
 def getIMUData(path):
     # function returns IMU data as list
@@ -99,7 +100,7 @@ for folder in datafolders:
         labels = os.path.join(folder_path, "labels")
         imu_data = getIMUData(os.path.join(folder_path, "imu", imu)) 
 
-        for sample in os.listdir(images):
+        for sample in sorted(os.listdir(images)):
             # copy image
             src_path_img = os.path.join(images, sample)
             sample_name = "0" * (5-len(list(str(sample_counter)))) + str(sample_counter)
@@ -114,7 +115,7 @@ for folder in datafolders:
             # create labels file
             src_path = os.path.join(labels, sample+".json")
             label_data = json.load(open(src_path, 'r'))
-            txtlabels = labelsJSON2Yolo(label_data, ship_pose, buoyGTData)
+            txtlabels = labelsJSON2Yolo(label_data)
             if txtlabels is None: # if dist between label buoy and query buoy too large -> skip 
                 continue
             if len(txtlabels) == 0: # if labels file empty
@@ -133,7 +134,7 @@ for folder in datafolders:
 
 # save imu data as json
 with open(imu_test_file, "w") as f:
-    json.dump(imu_dict, f)
+    json.dump(imu_dict, f, indent=4)
 
 print("DONE!")
 print("Total Processed: ", datafolders)

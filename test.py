@@ -43,6 +43,7 @@ class BuoyAssociation():
         self.isclose = 150
 
         self.metrics = {"tp": 0, "fp": 0, "fn": 0, "IoU": 0, "tp_match": 0, "fp_match": 0, "fn_match": 0}
+        self.latency = {"time": 0, "count": 0}
 
 
     def test(self, test_dir, video=False):
@@ -65,14 +66,17 @@ class BuoyAssociation():
             ship_pose = imu_data[image.replace(".png", "")]
 
             # get inference predictions
+            start_time = time.perf_counter()
             if video:
                 pred, pred_dict = self.getPredictions(img, frame_id, ship_pose, moving_average=True, boxMOT=True)
             else:
                 pred, pred_dict = self.getPredictions(img, frame_id, ship_pose, moving_average=False, boxMOT=False)
+            self.latency["time"] += (time.perf_counter() - start_time)*1000
 
             # get nearby buoys 
             buoyCoords = self.BuoyCoordinates.getBuoyLocations(ship_pose[0], ship_pose[1])
 
+            start_time = time.perf_counter()    # exclude getBuoyLocations from time measurement since this is not part of inference
             # extract relevant gt buoys for the current frame from the buoyCoords file
             filteredBuoys = self.getNearbyBuoys(ship_pose, buoyCoords)
             # filter buoy predictions (NNS & relative Thresholding)
@@ -96,7 +100,10 @@ class BuoyAssociation():
                     self.computeMatchingConf(int(pred[idx_pred, 8]), filteredBuoys[m[0]]) # icrease conf of pred gt matched pair
 
                 bb_pred = pred[idx_pred, 0:4]   # get BB coordinates
-                id = self.BuoyCoordinates.getBuoyID(*filteredBuoys[idx_buoyGT])  # get ID of matchted GT buoy
+                start_time_2 = time.perf_counter()    # exclude getBuoyLocations from time measurement since this is not part of inference
+                id = self.BuoyCoordinates.getBuoyID(*filteredBuoys[idx_buoyGT])  # get ID of matchted GT buoy, also excluded from inference time
+                delta = (time.perf_counter() - start_time_2)*1000
+                self.latency["time"] -= delta
 
                 pred_results.append(torch.cat((bb_pred, torch.tensor([id]))))
                 matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
@@ -113,6 +120,9 @@ class BuoyAssociation():
                 # compute heading bias & focal length delta
                 self.correctCameraBias(matched_pairs, pred_dict['ship'], pred)
 
+            self.latency["time"] += (time.perf_counter() - start_time)*1000
+            self.latency["count"] += 1
+
             # get corresponding labels file 
             labels = self.loadLabels(os.path.join(labels_dir, image.replace(".png", ".txt")))
             self.computeMetrics(labels, pred_results)
@@ -121,6 +131,13 @@ class BuoyAssociation():
 
         print("Testing Done")
         self.print_metrics()
+        print()
+        self.print_latency()
+
+    def print_latency(self):
+        latency = self.latency["time"] / self.latency["count"]
+        print("Latency: ", round(latency), "ms")
+        print("FPS: ", round(1 / (latency/1000), 2))
 
     def print_metrics(self):
         print("Results:")
@@ -155,7 +172,7 @@ class BuoyAssociation():
                         fn += 1     # label is fn, since no correct matched pred exists
                         fp += 1     # pred with bouy id is fp since in wrong place
                     matched=True
-                    self.metrics['IoU'] += iou
+                    self.metrics['IoU'] += iou.item()
                     self.metrics['tp_match'] += 1
                     break
             if not matched:

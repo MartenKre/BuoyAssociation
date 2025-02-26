@@ -23,6 +23,7 @@ class DistanceEstimator():
         self.img_size = img_size
         self.conf_thresh = conv_thresh  # conf thresh for NMS
         self.iou_thresh = iou_thresh    # iou thresh for NMS
+        print("Parameter Count: ", sum(p.numel() for p in self.model.parameters()))
 
     def __call__(self, img):
         # runs inference of given image

@@ -1,8 +1,12 @@
+from OpenGL.arrays import returnPointer
 import geojson
 import geopandas as gpd
 import pandas as pd
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
+import math
+
+from utility.Transformations import haversineDist
 
 # Class Reads Geojson file containing buoy coordinates and returns locations for a specified position and tilesize
 
@@ -28,6 +32,24 @@ class GetGeoData():
             if abs(buoy_lng - pos_lng) < self.tile_size and abs(buoy_lat - pos_lat) < self.tile_size:
                 buoys.append(buoy)
         return buoys
+
+    def getBuoyID(self, buoy_lat, buoy_lng):
+        # Function returns buoy id for given coordinates lat & lng, if bouy exits inside database
+        # Arguments: buoy_lat & buoy_lng are geographical coordinates
+        self.tile_center = {"lat": buoy_lat, "lng": buoy_lng}
+        res = None
+        min_dist = math.inf
+        for buoy in self.data["features"]:
+            buoy2_lat = buoy["geometry"]["coordinates"][1]
+            buoy2_lng = buoy["geometry"]["coordinates"][0]
+            dist = haversineDist(buoy_lat, buoy_lng, buoy2_lat, buoy2_lng)
+            if dist < min_dist:
+                min_dist = dist
+                res = buoy
+
+        if round(min_dist) > 5:
+            print(f"Warning: Min dist of matched buoys is {min_dist}")
+        return res["properties"]["id"]
 
     def getBuoyLocationsThreading(self, pos_lat, pos_lng, results_list, event):
         # Function to get BuoyLocations in a thread -> saves locations in a results_list and sets event flag

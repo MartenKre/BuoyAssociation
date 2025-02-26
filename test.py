@@ -717,4 +717,5 @@ class BuoyAssociation():
 
 ba = BuoyAssociation()
 
-ba.test(test_dir="/home/marten/Uni/Semester_4/src/Trainingdata/Generated_Sets/YOLO_Testset")
+# ba.test(test_dir="/home/marten/Uni/Semester_4/src/Trainingdata/Generated_Sets/YOLO_Testset")
+ba.test(test_dir="/home/marten/Uni/Semester_4/src/TestData/TestLabeled/Generated_Sets/YOLO")

@@ -68,8 +68,10 @@ def getIMUData(path):
 
 # Settings:
 verbose = True
-target_dir = "/home/marten/Uni/Semester_4/src/Trainingdata/Generated_Sets/YOLO_Testset"
-data_path = "/home/marten/Uni/Semester_4/src/Trainingdata/labeled/"
+# target_dir = "/home/marten/Uni/Semester_4/src/Trainingdata/Generated_Sets/YOLO_Testset"
+# data_path = "/home/marten/Uni/Semester_4/src/Trainingdata/labeled/"
+target_dir = "/home/marten/Uni/Semester_4/src/TestData/TestLabeled/Generated_Sets/YOLO"
+data_path = "/home/marten/Uni/Semester_4/src/TestData/TestLabeled/labeled"
 if os.path.exists(target_dir):
     raise ValueError("Aborting... Specified target dir already exists:", target_dir)
 os.makedirs(target_dir, exist_ok=True)
@@ -85,7 +87,7 @@ sample_counter = 0
 datafolders = []
 for folder in os.listdir(data_path):
     if os.path.isdir(os.path.join(data_path, folder)):
-        if folder == 'Testdata':
+        if folder == 'Testdata' or folder == "Seq1":
             datafolders.append(folder)
 
 print("Folders Found: ", sorted(datafolders))

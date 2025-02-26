@@ -60,7 +60,7 @@ class BuoyAssociation():
 
 
         frame_id = 0
-        for image in tqdm(os.listdir(images_dir)):   
+        for image in tqdm(sorted(os.listdir(images_dir))):   
             image_path = os.path.join(images_dir, image) 
             img = cv2.imread(image_path)
             ship_pose = imu_data[image.replace(".png", "")]
@@ -103,15 +103,18 @@ class BuoyAssociation():
                 start_time_2 = time.perf_counter()    # exclude getBuoyLocations from time measurement since this is not part of inference
                 id = self.BuoyCoordinates.getBuoyID(*filteredBuoys[idx_buoyGT])  # get ID of matchted GT buoy, also excluded from inference time
                 delta = (time.perf_counter() - start_time_2)*1000
-                self.latency["time"] -= delta
+                # print(delta)
+                # self.latency["time"] -= delta
 
                 pred_results.append(torch.cat((bb_pred, torch.tensor([id]))))
                 matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
+
             if len(pred_results) > 0:
                 pred_results = torch.stack(pred_results)
                 pred_results = self.xyxy2cxcywh(pred_results, img_dims=self.image_size)
             else:
                 pred_results = torch.zeros((0, 5))
+
 
             if video:
                 self.decayMatchingConf()    # decay conf for all matched pairs
@@ -718,4 +721,4 @@ class BuoyAssociation():
 ba = BuoyAssociation()
 
 # ba.test(test_dir="/home/marten/Uni/Semester_4/src/Trainingdata/Generated_Sets/YOLO_Testset")
-ba.test(test_dir="/home/marten/Uni/Semester_4/src/TestData/TestLabeled/Generated_Sets/YOLO", video=False)
+ba.test(test_dir="/home/marten/Uni/Semester_4/src/TestData/TestLabeled/Generated_Sets/YOLO", video=True)

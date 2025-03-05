@@ -910,7 +910,6 @@ class BuoyAssociation():
                     self.distanceEstimator.drawBoundingBoxes(frame, pred[idx_pred].unsqueeze(0), color=color[:3], conf_thresh=self.conf_thresh)   # draw bounding boxes based on matched indices
 
                     # save results to detection.txt file for lookout ar application
-                    print(pred[idx_pred])
                     x,y,w,h,conf = pred[idx_pred][0:5]
                     object_name = "other"
                     obj_id = frame_id + i   # provided by object tracker (currently unused)

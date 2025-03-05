@@ -4,3 +4,4 @@ __pycache__/
 *.avi
 *.pdf
 *test_output/
+*detections.txt

@@ -50,6 +50,12 @@ class GetGeoData():
             print(f"Warning: Min dist of matched buoys is {min_dist}")
         return res["properties"]["id"]
 
+    def getBuoyByID(self, ID):
+        for buoy in self.data["features"]:
+            if buoy["properties"]["id"] == ID:
+                return buoy
+        return None
+
     def getBuoyLocationsThreading(self, pos_lat, pos_lng, results_list, event):
         # Function to get BuoyLocations in a thread -> saves locations in a results_list and sets event flag
         # Arguments: pos_lat & pos_lng are geographical coordinates

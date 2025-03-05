@@ -12,5 +12,8 @@ Additional tasks:
 - Online Computation of Camera Intrinsics by Cost Minimalization of Angle Deviation	✓
 - Develop concept of how to deal with incorrect buoy GT data
 
-Detailed Camera Information:
+Detailed Chip Information:
 https://docs.luxonis.com/hardware/sensors/IMX378
+
+Camera:
+https://shop.luxonis.com/products/oak-d-w?variant=44149271265503

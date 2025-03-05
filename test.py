@@ -43,6 +43,9 @@ class BuoyAssociation():
         self.isclose = 150
 
         self.metrics = {"tp": 0, "fp": 0, "fn": 0, "IoU": 0, "tp_match": 0, "fp_match": 0, "fn_match": 0}
+        self.metrics_dist = {}
+        for dist in range(1, 20):
+            self.metrics_dist[dist] = {"tp": 0, "fp": 0, "fn": 0, "IoU": 0, "tp_match": 0}
         self.latency = {"time": 0, "count": 0}
 
 
@@ -60,7 +63,7 @@ class BuoyAssociation():
 
 
         frame_id = 0
-        for image in tqdm(sorted(os.listdir(images_dir))):   
+        for image in tqdm(os.listdir(images_dir)):   
             image_path = os.path.join(images_dir, image) 
             img = cv2.imread(image_path)
             ship_pose = imu_data[image.replace(".png", "")]
@@ -103,8 +106,7 @@ class BuoyAssociation():
                 start_time_2 = time.perf_counter()    # exclude getBuoyLocations from time measurement since this is not part of inference
                 id = self.BuoyCoordinates.getBuoyID(*filteredBuoys[idx_buoyGT])  # get ID of matchted GT buoy, also excluded from inference time
                 delta = (time.perf_counter() - start_time_2)*1000
-                # print(delta)
-                # self.latency["time"] -= delta
+                self.latency["time"] -= delta
 
                 pred_results.append(torch.cat((bb_pred, torch.tensor([id]))))
                 matched_pairs[int(pred[idx_pred, 8])] = (filteredPreds[m[1]], filteredBuoys[m[0]], idx_pred)
@@ -129,6 +131,7 @@ class BuoyAssociation():
             # get corresponding labels file 
             labels = self.loadLabels(os.path.join(labels_dir, image.replace(".png", ".txt")))
             self.computeMetrics(labels, pred_results)
+            # self.compute_F1_over_dist(labels, pred_results, ship_pose)
 
             frame_id += 1
 
@@ -136,6 +139,8 @@ class BuoyAssociation():
         self.print_metrics()
         print()
         self.print_latency()
+        print()
+        # self.save_F1_over_dist("test_output")
 
     def print_latency(self):
         latency = self.latency["time"] / self.latency["count"]
@@ -191,6 +196,58 @@ class BuoyAssociation():
         self.metrics["tp"] += tp
         self.metrics["fp"] += fp
         self.metrics["fn"] += fn
+
+
+    def compute_F1_over_dist(self, preds, labels, ship_pose, iou_thresh=0.5):
+        for label in labels:  # check labels
+            matched = False
+            # compute dist 
+            buoy = self.BuoyCoordinates.getBuoyByID(label[-1])
+            dist = haversineDist(buoy["geometry"]["coordinates"][1], buoy["geometry"]["coordinates"][0], ship_pose[0], ship_pose[1])
+            dist = min(int(dist // 50), 19)
+            for pred in preds:
+                if label[-1] == pred[-1]:   # if id in pred and label match, check for iou
+                    bb_l = self.box_cxcywh_to_xyxy(label[:-1].unsqueeze(0))
+                    bb_p = self.box_cxcywh_to_xyxy(pred[:-1].unsqueeze(0))
+                    iou = self.box_iou(bb_l, bb_p)
+                    if iou > iou_thresh:
+                        self.metrics_dist[dist]['tp'] += 1
+                    else:           # if iou_thresh is not exceeded
+                        self.metrics_dist[dist]['fn'] += 1
+                        self.metrics_dist[dist]['fp'] += 1
+                    matched=True
+                    self.metrics_dist[dist]['IoU'] += iou.item()
+                    self.metrics_dist[dist]['tp_match'] += 1
+                    break
+            if not matched:
+                self.metrics_dist[dist]['fn'] += 1
+
+        covered_ids = labels[:,-1]
+        for pred in preds:  # check remaining preds -> predictions that do not occur in labels are FP
+            if pred[-1] not in covered_ids:
+                buoy = self.BuoyCoordinates.getBuoyByID(pred[-1])
+                dist = haversineDist(buoy["geometry"]["coordinates"][1], buoy["geometry"]["coordinates"][0], ship_pose[0], ship_pose[1])
+                dist = int(dist // 50)
+                self.metrics_dist[dist]['fp'] += 1
+
+
+    def save_F1_over_dist(self, test_dir):
+        distances = sorted([k for k in self.metrics_dist])
+        res = np.zeros((len(distances), 3))
+        metrics = self.metrics_dist
+        for i, k in enumerate(distances):
+            p = metrics[k]["tp"] / (metrics[k]["tp"] + metrics[k]["fp"]) if metrics[k]["tp"]+ metrics[k]["fp"] > 0 else 0
+            r = metrics[k]["tp"] / (metrics[k]["tp"] + metrics[k]["fn"]) if metrics[k]["tp"]+ metrics[k]["fn"] > 0 else 0
+            f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0
+            iou = metrics[k]["IoU"] / metrics[k]["tp_match"] if metrics[k]["tp_match"] > 0 else 0
+            res[i, 0] = k
+            res[i, 1] = f1
+            res[i, 2] = iou
+        print()
+        print("F1 and IoU over distances:")
+        print(res)
+        os.makedirs(test_dir, exist_ok=True)
+        np.save(os.path.join(test_dir, 'np_arr.npy'), res)
        
         
     def box_iou(self, boxes1, boxes2):
